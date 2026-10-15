@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from .kernel import Document, Feature
+from .camera import ray_plane
 from .sketch import CONSTRAINT_KINDS, Constraint, Sketch, SketchPlane, standard_plane
 from .viewport import Viewport
 
@@ -20,23 +21,32 @@ FILE_FILTER = "rCad project (*.rcad)"
 
 
 class ExtrudeDialog(QDialog):
-    def __init__(self, parent, distance=10.0, cut=False, show_cut=True):
+    def __init__(self, parent, distance=10.0, auto=True, cut=False, show_mode=True):
         super().__init__(parent)
         self.setWindowTitle("Extrude")
         self.dist = QDoubleSpinBox()
         self.dist.setRange(-1e5, 1e5)
         self.dist.setDecimals(3)
         self.dist.setValue(distance)
-        self.cut = QCheckBox("Cut (subtract from body)")
-        self.cut.setChecked(cut)
+        self.mode = QComboBox()
+        self.mode.addItems(["Auto (into the body = cut, away = add)", "Add (join)", "Cut (subtract)"])
+        self.mode.setCurrentIndex(0 if auto else 2 if cut else 1)
         form = QFormLayout(self)
         form.addRow("Distance (negative = opposite side)", self.dist)
-        if show_cut:
-            form.addRow(self.cut)
+        if show_mode:
+            form.addRow("Operation", self.mode)
         box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         box.accepted.connect(self.accept)
         box.rejected.connect(self.reject)
         form.addRow(box)
+
+    @property
+    def auto(self) -> bool:
+        return self.mode.currentIndex() == 0
+
+    @property
+    def cut(self) -> bool:
+        return self.mode.currentIndex() == 2
 
 
 class MainWindow(QMainWindow):
@@ -49,6 +59,8 @@ class MainWindow(QMainWindow):
         self.sketch_index = -1
         self.tool = "select"
         self.pending = None  # first click of a two-click tool
+        self.hover_region = None  # (sketch feature index, region index) under the cursor
+        self.region_sketch = -1  # sketch whose regions were highlighted last
 
         self.view = Viewport()
         self.setCentralWidget(self.view)
@@ -192,7 +204,8 @@ class MainWindow(QMainWindow):
         self.view.overlay_sketches = [f.sketch for f in self.doc.features if f.kind == "sketch" and f.visible]
         self.view.set_mesh(self.doc.mesh)
         self.refresh_constraints()
-        self.view.update()
+        self.hover_region = None  # the geometry under the cursor may have changed
+        self._update_regions()
 
     def refresh_constraints(self):
         self.constraints.clear()
@@ -284,10 +297,10 @@ class MainWindow(QMainWindow):
         self.view.sketch_sel.clear()
         self.view.sel_faces.clear()
         self.view.sel_edges.clear()
-        if self.mode == "sketch":
-            self.sketch.selection = []
-            self._update_regions()
-        self.view.update()
+        for f in self.doc.features:
+            if f.kind == "sketch" and (self.mode == "model" or f is self.doc.features[self.sketch_index]):
+                f.sketch.selection = []
+        self._update_regions()
 
     def _snap(self, x, y):
         """-> (existing point index or None, (u, v)) for the cursor, or None if the ray misses the plane."""
@@ -301,16 +314,40 @@ class MainWindow(QMainWindow):
         return None, ((round(uv[0] / g) * g, round(uv[1] / g) * g) if g > 0 else uv)
 
     def _update_regions(self):
-        """Refresh the filled highlight for selected and hovered sketch regions."""
+        """Refresh the fill for selected and hovered sketch regions (hover_region = (feature index, region))."""
         fills = []
-        if self.mode == "sketch":
-            sk = self.sketch
-            chosen = sk.selected_regions()
-            fills = [(sk.region_triangles(i), (1.0, 0.55, 0.15, 0.45)) for i in sorted(chosen)]
-            if self.hover_region is not None and self.hover_region not in chosen:
-                fills.append((sk.region_triangles(self.hover_region), (0.95, 0.9, 0.3, 0.35)))
+        for i, f in enumerate(self.doc.features):
+            if f.kind != "sketch":
+                continue
+            shown = i == self.sketch_index if self.mode == "sketch" else f.visible
+            if not shown:
+                continue
+            chosen = f.sketch.selected_regions()
+            fills += [(f.sketch.region_triangles(r), (1.0, 0.55, 0.15, 0.45)) for r in sorted(chosen)]
+            if self.hover_region is not None and self.hover_region[0] == i and self.hover_region[1] not in chosen:
+                fills.append((f.sketch.region_triangles(self.hover_region[1]), (0.95, 0.9, 0.3, 0.35)))
         self.view.region_fill = fills
         self.view.update()
+
+    def _pick_region(self, x, y):
+        """Visible-sketch region under the cursor and not hidden behind a model face: (feature, region, (u, v))."""
+        cam, w, h = self.view.camera, self.view.width(), self.view.height()
+        o, d = cam.ray(x, y, w, h)
+        face_t = self.view.pick_face_hit(x, y)[1]
+        best = None
+        for i, f in enumerate(self.doc.features):
+            if f.kind != "sketch" or not f.visible:
+                continue
+            pl = f.sketch.plane
+            p = ray_plane(o, d, pl.origin, np.array(pl.normal))
+            if p is None:
+                continue
+            t = float(np.dot(p - o, d))
+            uv = pl.to_uv(p)
+            r = f.sketch.region_at(*uv)
+            if r is not None and (face_t is None or t <= face_t + 1e-4 * cam.dist) and (best is None or t < best[0]):
+                best = (t, i, r, uv)
+        return None if best is None else best[1:]
 
     def _solve_sketch(self):
         ok = self.sketch.solve()
@@ -333,6 +370,7 @@ class MainWindow(QMainWindow):
                     sel.clear()
                 if uv is not None:
                     sk.toggle_region(uv[0], uv[1], multi)
+                    self.region_sketch = self.sketch_index
                     self.mark_dirty()
             elif multi:
                 sel.symmetric_difference_update({hit})
@@ -483,15 +521,24 @@ class MainWindow(QMainWindow):
         v = self.view
         multi = bool(mods & Qt.ControlModifier)
         edge = v.pick_edge(x, y)
-        face = None if edge is not None else v.pick_face(x, y)
+        hit = None if edge is not None else self._pick_region(x, y)
+        face = None if edge is not None or hit is not None else v.pick_face(x, y)
         if not multi:
             v.sel_faces.clear()
             v.sel_edges.clear()
+            for j, f in enumerate(self.doc.features):
+                if f.kind == "sketch" and (hit is None or j != hit[0]):
+                    f.sketch.selection = []
         if edge is not None:
             v.sel_edges.symmetric_difference_update({edge})
+        elif hit is not None:
+            i, _, uv = hit
+            self.doc.features[i].sketch.toggle_region(uv[0], uv[1], multi)
+            self.region_sketch = i
+            self.mark_dirty()
         elif face is not None:
             v.sel_faces.symmetric_difference_update({face})
-        v.update()
+        self._update_regions()
 
     def on_hover(self, x, y):
         if self.mode == "sketch":
@@ -500,22 +547,30 @@ class MainWindow(QMainWindow):
                 return
             uv = self.view.sketch_uv(x, y)
             near = self.view.pick_sketch(x, y) is not None
-            region = None if uv is None or near else self.sketch.region_at(*uv)
+            r = None if uv is None or near else self.sketch.region_at(*uv)
+            region = None if r is None else (self.sketch_index, r)
             if region != self.hover_region:
                 self.hover_region = region
                 self._update_regions()
             return
         edge = self.view.pick_edge(x, y)
-        face = None if edge is not None else self.view.pick_face(x, y)
-        if (edge, face) != (self.view.hover_edge, self.view.hover_face):
+        hit = None if edge is not None else self._pick_region(x, y)
+        region = None if hit is None else hit[:2]
+        face = None if edge is not None or hit is not None else self.view.pick_face(x, y)
+        if (edge, face) != (self.view.hover_edge, self.view.hover_face) or region != self.hover_region:
             self.view.hover_edge, self.view.hover_face = edge, face
-            self.view.update()
+            self.hover_region = region
+            self._update_regions()
 
     def _sketch_for_extrude(self) -> int | None:
+        feats = self.doc.features
+        if 0 <= self.region_sketch < len(feats) and feats[self.region_sketch].kind == "sketch" \
+                and feats[self.region_sketch].sketch.selected_regions():
+            return self.region_sketch
         row = self.features.currentRow()
-        if 0 <= row < len(self.doc.features) and self.doc.features[row].kind == "sketch":
+        if 0 <= row < len(feats) and feats[row].kind == "sketch":
             return row
-        idx = [i for i, f in enumerate(self.doc.features) if f.kind == "sketch"]
+        idx = [i for i, f in enumerate(feats) if f.kind == "sketch"]
         return idx[-1] if idx else None
 
     def extrude(self):
@@ -543,10 +598,10 @@ class MainWindow(QMainWindow):
             return
         chosen = sorted(sk.selected_regions())
         profiles = [list(next(p for p in sk.selection if sk.region_at(*p) == r)) for r in chosen] or None
-        dlg = ExtrudeDialog(self, show_cut=self.doc.part is not None)
+        dlg = ExtrudeDialog(self, show_mode=self.doc.part is not None)
         dlg.setWindowTitle(f"Extrude {len(profiles)} highlighted region(s)" if profiles else "Extrude all regions")
         if dlg.exec():
-            self.commit(Feature("extrude", sketch_ref=i, value=dlg.dist.value(), cut=dlg.cut.isChecked(),
+            self.commit(Feature("extrude", sketch_ref=i, value=dlg.dist.value(), cut=dlg.cut, auto=dlg.auto,
                                 profiles=profiles))
 
     def pushpull(self):
@@ -584,21 +639,21 @@ class MainWindow(QMainWindow):
             self.enter_sketch(i)
             return
         if f.kind == "extrude":
-            dlg = ExtrudeDialog(self, f.value, f.cut)
+            dlg = ExtrudeDialog(self, f.value, f.auto, f.cut)
             if not dlg.exec():
                 return
-            new = (dlg.dist.value(), dlg.cut.isChecked())
+            new = (dlg.dist.value(), dlg.cut, dlg.auto)
         else:
             v, ok = QInputDialog.getDouble(self, f.kind, "Value:", f.value, -1e5, 1e5, 3)
             if not ok or v == 0:
                 return
-            new = (v, f.cut)
-        old = (f.value, f.cut)
-        f.value, f.cut = new
+            new = (v, f.cut, f.auto)
+        old = (f.value, f.cut, f.auto)
+        f.value, f.cut, f.auto = new
         self.rebuild()
         if i in self.doc.errors:
             QMessageBox.warning(self, "Operation failed", self.doc.errors[i])
-            f.value, f.cut = old
+            f.value, f.cut, f.auto = old
             self.rebuild()
 
     def toggle_layer(self, item):
@@ -608,7 +663,7 @@ class MainWindow(QMainWindow):
         if f.kind == "sketch":
             self.view.overlay_sketches = [g.sketch for g in self.doc.features if g.kind == "sketch" and g.visible]
             self.mark_dirty()
-            self.view.update()
+            self._update_regions()
         else:
             self.rebuild()
 

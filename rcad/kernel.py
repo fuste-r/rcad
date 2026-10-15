@@ -25,13 +25,17 @@ class Feature:
     edges: list = field(default_factory=list)  # fillet/chamfer: midpoints of picked edges
     visible: bool = True  # layer toggle: sketches show/hide curves, other features are suppressed when off
     profiles: list | None = None  # extrude: points inside the sketch regions to use; None = all regions
+    auto: bool = False  # extrude: cut when the extrusion mostly lies inside the body, otherwise add
+    resolved_cut: bool | None = field(default=None, compare=False, repr=False)  # last auto decision
 
     def label(self) -> str:
         if self.kind == "sketch":
             return f"{self.name} [{self.sketch.status}]"
         if self.kind == "extrude":
             part = f", {len(self.profiles)} region(s)" if self.profiles is not None else ""
-            return f"{'Cut' if self.cut else 'Extrude'} ({self.value:g}{part}) of #{self.sketch_ref}"
+            cut = self.resolved_cut if self.auto and self.resolved_cut is not None else self.cut
+            mode = " auto" if self.auto else ""
+            return f"{'Cut' if cut else 'Extrude'}{mode} ({self.value:g}{part}) of #{self.sketch_ref}"
         if self.kind == "pushpull":
             return f"Push/Pull {self.value:+g}"
         return f"{self.kind.title()} {self.value:g} x{len(self.edges)}"
@@ -39,7 +43,7 @@ class Feature:
     def to_dict(self) -> dict:
         d = {"kind": self.kind, "name": self.name, "sketch_ref": self.sketch_ref, "value": self.value,
              "cut": self.cut, "face": self.face, "edges": [list(e) for e in self.edges], "visible": self.visible,
-             "profiles": self.profiles}
+             "profiles": self.profiles, "auto": self.auto}
         if self.sketch:
             d["sketch"] = self.sketch.to_dict()
         return d
@@ -51,7 +55,8 @@ class Feature:
         return Feature(d["kind"], d.get("name", ""), Sketch.from_dict(d["sketch"]) if "sketch" in d else None,
                        d.get("sketch_ref", -1), d.get("value", 0.0), d.get("cut", False),
                        tuple(map(tuple, d["face"])) if d.get("face") else None,
-                       [tuple(e) for e in d.get("edges", [])], d.get("visible", True), d.get("profiles"))
+                       [tuple(e) for e in d.get("edges", [])], d.get("visible", True), d.get("profiles"),
+                       d.get("auto", False))
 
 
 @dataclass
@@ -123,6 +128,16 @@ def _find_planar_face(part: Shape, center, normal):
     return best
 
 
+def _mostly_inside(part: Shape, solid: Shape) -> bool:
+    """True when more than half of `solid` overlaps `part`, i.e. the extrusion goes into the body."""
+    try:
+        res = part.intersect(solid)
+        shapes = res if isinstance(res, list) else [res] if res else []
+        return sum(s.volume for s in shapes) > 0.5 * solid.volume
+    except Exception:  # degenerate boolean: treat as outside
+        return False
+
+
 def _find_edge(part: Shape, mid, tol=1e-3):
     m = np.asarray(mid, float)
     best, best_d = None, tol
@@ -172,7 +187,10 @@ class Document:
             solid = self.features[f.sketch_ref].sketch.solid(f.value, f.profiles)
             if solid is None:
                 raise ValueError("sketch has no matching closed region or distance is zero")
-            return self._combine(part, solid, f.cut)
+            cut = f.cut
+            if f.auto:
+                cut = f.resolved_cut = part is not None and _mostly_inside(part, solid)
+            return self._combine(part, solid, cut)
         if f.kind == "pushpull":
             if part is None:
                 raise ValueError("nothing to push/pull")

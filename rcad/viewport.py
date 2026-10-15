@@ -75,11 +75,15 @@ class Viewport(QOpenGLWidget):
 
     # -- picking
     def pick_face(self, x, y) -> int | None:
+        return self.pick_face_hit(x, y)[0]
+
+    def pick_face_hit(self, x, y):
+        """-> (face index, ray distance), or (None, None) when no model face is under the cursor."""
         if self.mesh is None or not len(self._tri):
-            return None
+            return None, None
         o, d = self.camera.ray(x, y, self.width(), self.height())
-        k, _ = ray_triangles(o, d, self._tri)
-        return None if k is None else int(self.mesh.tri_face[k])
+        k, t = ray_triangles(o, d, self._tri)
+        return (None, None) if k is None else (int(self.mesh.tri_face[k]), t)
 
     def pick_edge(self, x, y, px=7.0) -> int | None:
         if not len(self._segs):

@@ -121,3 +121,43 @@ def test_model_extrude_asks_for_region_when_ambiguous(qapp, monkeypatch):
     w.set_tool("line")
     w.cancel()  # Esc with nothing in progress returns to Select
     assert w.tool == "select"
+
+
+def test_select_regions_in_model_mode(qapp, monkeypatch):
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    monkeypatch.setattr(appmod.ExtrudeDialog, "exec", lambda self: True)
+    w = appmod.MainWindow()
+    w.view.resize(1000, 700)
+    w.doc.features.append(Feature("sketch", "S", sketch=two_rects()))
+    w.refresh()
+    w.view.camera.look_at_plane((25, 5, 0), (0, 0, 1), (1, 0, 0), 120)
+    w.on_hover(*_px(w, (10, 5, 0)))
+    assert w.hover_region is not None and len(w.view.region_fill) == 1
+    _click(w, (10, 5, 0))
+    assert w.doc.features[0].sketch.selected_regions() and w.region_sketch == 0
+    assert any(c[0] == 1.0 for _, c in w.view.region_fill)
+    _click(w, (40, 5, 0), Qt.ControlModifier)
+    assert len(w.doc.features[0].sketch.selected_regions()) == 2
+    _click(w, (40, 5, 0), Qt.ControlModifier)
+    assert len(w.doc.features[0].sketch.selected_regions()) == 1
+    w.extrude()  # selection made outside sketch mode drives the extrude
+    assert w.mode == "model" and not w.doc.errors
+    assert w.doc.features[1].profiles is not None and len(w.doc.features[1].profiles) == 1
+    assert w.doc.part.volume == pytest.approx(20 * 10 * 10)
+
+    # a region behind the new body is not pickable; hiding the layer removes it from picking
+    w.view.camera.look_at_plane((25, 5, 0), (0, 0, 1), (1, 0, 0), 120)
+    assert w._pick_region(*_px(w, (10, 5, 0))) is None
+    w.cancel()
+    assert w.doc.features[0].sketch.selection == [] and w.view.region_fill == []
+
+
+def test_coplanar_region_wins_over_face(qapp):
+    w = appmod.MainWindow()
+    w.view.resize(1000, 700)
+    w.doc.features += [Feature("sketch", "S", sketch=two_rects()), Feature("extrude", sketch_ref=0, value=-5)]
+    w.doc.rebuild()
+    w.refresh()
+    w.view.camera.look_at_plane((25, 5, 0), (0, 0, 1), (1, 0, 0), 120)
+    _click(w, (10, 5, 0))
+    assert w.doc.features[0].sketch.selected_regions() and not w.view.sel_faces

@@ -32,10 +32,7 @@ def shot(name):
 
 def step2():
     shot("/tmp/shot_model.png")
-    w.enter_sketch(0)
-    w.sketch.toggle_region(10, 5, False)
-    w.sketch.toggle_region(60, 20, True)
-    w.hover_region = None
+    w.doc.features[0].sketch.toggle_region(5, 5, False)
     w._update_regions()
     QTimer.singleShot(700, lambda: (shot("/tmp/shot_regions.png"), a.quit()))
 
