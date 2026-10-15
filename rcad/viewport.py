@@ -149,6 +149,7 @@ class Viewport(QOpenGLWidget):
     def initializeGL(self):
         GL.glClearColor(0.93, 0.94, 0.96, 1)
         GL.glEnable(GL.GL_DEPTH_TEST)
+        GL.glDepthFunc(GL.GL_LEQUAL)  # highlight pass redraws the same triangles at equal depth
         GL.glEnable(GL.GL_LIGHTING)
         GL.glEnable(GL.GL_LIGHT0)
         GL.glEnable(GL.GL_COLOR_MATERIAL)
