@@ -15,6 +15,8 @@ f.setDepthBufferSize(24)
 QSurfaceFormat.setDefaultFormat(f)
 a = QApplication(sys.argv)
 w = appmod.MainWindow()
+if len(sys.argv) > 1:
+    w.set_theme(sys.argv[1], save=False)  # light, dark or system
 sk = Sketch(standard_plane("XY"))
 sk.add_rect(0, 0, 50, 30)
 c = sk.add_point(25, 15)

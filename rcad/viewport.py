@@ -8,6 +8,7 @@ from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from .camera import Camera, point_segment_dist, ray_plane, ray_triangles
 from .kernel import MeshData
 from .sketch import Sketch
+from .theme import LIGHT, Theme
 
 DRAG_PX = 4
 
@@ -20,6 +21,7 @@ class Viewport(QOpenGLWidget):
         super().__init__()
         self.setMouseTracking(True)
         self.camera = Camera()
+        self.theme: Theme = LIGHT
         self.unit_mm = 1.0  # millimetres per display unit; the grid steps in whole display units
         self.mesh: MeshData | None = None
         self.sketch: Sketch | None = None
@@ -153,7 +155,6 @@ class Viewport(QOpenGLWidget):
 
     # -- GL
     def initializeGL(self):
-        GL.glClearColor(0.93, 0.94, 0.96, 1)
         GL.glEnable(GL.GL_DEPTH_TEST)
         GL.glDepthFunc(GL.GL_LEQUAL)  # highlight pass redraws the same triangles at equal depth
         GL.glEnable(GL.GL_LIGHTING)
@@ -161,9 +162,25 @@ class Viewport(QOpenGLWidget):
         GL.glEnable(GL.GL_COLOR_MATERIAL)
         GL.glEnable(GL.GL_NORMALIZE)
         GL.glLightModeli(GL.GL_LIGHT_MODEL_TWO_SIDE, 1)
-        GL.glEnable(GL.GL_LINE_SMOOTH)
+
+    def _reset_gl_state(self):
+        """Qt's own painting leaves texture/blend/array state behind, which tints fixed-function drawing."""
+        GL.glUseProgram(0)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, 0)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+        for cap in (GL.GL_TEXTURE_2D, GL.GL_BLEND, GL.GL_CULL_FACE, GL.GL_STENCIL_TEST, GL.GL_SCISSOR_TEST,
+                    GL.GL_LINE_STIPPLE, GL.GL_ALPHA_TEST):
+            GL.glDisable(cap)
+        for arr in (GL.GL_COLOR_ARRAY, GL.GL_TEXTURE_COORD_ARRAY, GL.GL_NORMAL_ARRAY, GL.GL_VERTEX_ARRAY):
+            GL.glDisableClientState(arr)
+        GL.glColorMask(GL.GL_TRUE, GL.GL_TRUE, GL.GL_TRUE, GL.GL_TRUE)
+        GL.glBlendEquation(GL.GL_FUNC_ADD)
+        GL.glDisable(GL.GL_COLOR_LOGIC_OP)
+        GL.glPolygonMode(GL.GL_FRONT_AND_BACK, GL.GL_FILL)
 
     def paintGL(self):
+        self._reset_gl_state()
+        GL.glClearColor(*self.theme.background, 1)
         GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
         w, h = max(self.width(), 1), max(self.height(), 1)
         r = self.devicePixelRatio()
@@ -189,7 +206,7 @@ class Viewport(QOpenGLWidget):
         n = 10
         pl = self.sketch.plane if self.sketch else None
         GL.glLineWidth(1)
-        GL.glColor3f(0.78, 0.8, 0.83)
+        GL.glColor3f(*self.theme.grid)
         GL.glBegin(GL.GL_LINES)
         for i in range(-n, n + 1):
             for a, b in (((i * step, -n * step), (i * step, n * step)), ((-n * step, i * step), (n * step, i * step))):
@@ -224,9 +241,9 @@ class Viewport(QOpenGLWidget):
         GL.glEnableClientState(GL.GL_NORMAL_ARRAY)
         GL.glVertexPointer(3, GL.GL_FLOAT, 0, self._verts)
         GL.glNormalPointer(GL.GL_FLOAT, 0, self._norms)
-        GL.glColor3f(0.62, 0.72, 0.86)
+        GL.glColor3f(*self.theme.model)
         GL.glDrawArrays(GL.GL_TRIANGLES, 0, len(self._verts))
-        for faces, col in (({self.hover_face} - {None}, (0.85, 0.85, 0.5)), (self.sel_faces, (1.0, 0.6, 0.2))):
+        for faces, col in (({self.hover_face} - {None}, self.theme.face_hover), (self.sel_faces, self.theme.face_select)):
             GL.glColor3f(*col)
             for f in faces:
                 a, b = self._tri_range(f)
@@ -236,10 +253,11 @@ class Viewport(QOpenGLWidget):
         GL.glDisable(GL.GL_POLYGON_OFFSET_FILL)
 
         GL.glDisable(GL.GL_LIGHTING)
+        t = self.theme
         for i, e in enumerate(self.mesh.edges):
             sel, hov = i in self.sel_edges, i == self.hover_edge
             GL.glLineWidth(3 if sel or hov else 1.5)
-            GL.glColor3f(*((0.9, 0.1, 0.1) if sel else (0.1, 0.5, 0.9) if hov else (0.15, 0.15, 0.2)))
+            GL.glColor3f(*(t.edge_select if sel else t.edge_hover if hov else t.edge))
             GL.glBegin(GL.GL_LINE_STRIP)
             for p in e.polyline:
                 GL.glVertex3f(*p)
@@ -252,7 +270,7 @@ class Viewport(QOpenGLWidget):
         world = np.array([pl.to3d(*p) for p in sk.points]).reshape(-1, 3)
 
         def col(kind, i):
-            GL.glColor3f(*((1.0, 0.35, 0.1) if (kind, i) in selected else base_color))
+            GL.glColor3f(*(self.theme.sketch_select if (kind, i) in selected else base_color))
 
         GL.glLineWidth(2.5)
         for i, (a, b) in enumerate(sk.lines):
@@ -282,7 +300,8 @@ class Viewport(QOpenGLWidget):
         GL.glDisable(GL.GL_DEPTH_TEST)
         if self.region_fill:
             GL.glEnable(GL.GL_BLEND)
-            GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA)
+            # keep framebuffer alpha at 1: Qt composites this widget as premultiplied alpha
+            GL.glBlendFuncSeparate(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA, GL.GL_ZERO, GL.GL_ONE)
             for tris, color in self.region_fill:
                 GL.glColor4f(*color)
                 GL.glBegin(GL.GL_TRIANGLES)
@@ -292,10 +311,10 @@ class Viewport(QOpenGLWidget):
             GL.glDisable(GL.GL_BLEND)
         for other in self.overlay_sketches:
             if other is not sk:
-                self._draw_sketch_geometry(other, set(), (0.45, 0.55, 0.75))
+                self._draw_sketch_geometry(other, set(), self.theme.sketch_faded)
         if sk is not None:
-            self._draw_sketch_geometry(sk, self.sketch_sel, (0.05, 0.25, 0.75))
-        GL.glColor3f(0.4, 0.4, 0.4)
+            self._draw_sketch_geometry(sk, self.sketch_sel, self.theme.sketch)
+        GL.glColor3f(*self.theme.preview)
         GL.glLineWidth(1.5)
         for poly in self.preview:
             GL.glBegin(GL.GL_LINE_STRIP)

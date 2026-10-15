@@ -4,7 +4,7 @@ import math
 import sys
 
 import numpy as np
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut, QSurfaceFormat
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDockWidget, QDoubleSpinBox, QFileDialog,
@@ -16,6 +16,7 @@ from .kernel import Document, Feature
 from .camera import ray_plane
 from .sketch import CONSTRAINT_KINDS, Constraint, Sketch, SketchPlane, standard_plane
 from .units import MM, UNITS
+from .theme import CHOICES, apply_choice
 from .viewport import Viewport
 
 FILE_FILTER = "rCad project (*.rcad)"
@@ -100,6 +101,8 @@ class MainWindow(QMainWindow):
         self.resize(1300, 800)
         self.set_mode("model")
         self._apply_units()
+        saved = str(QSettings("rcad", "rcad").value("theme", "system"))
+        self.set_theme(saved if saved in CHOICES else "system", save=False)
 
     # ---- UI construction
     def _act(self, text, slot, tip="", shortcut=None, checkable=False):
@@ -127,6 +130,11 @@ class MainWindow(QMainWindow):
         self.unit_combo.setToolTip("Display and input units (geometry is stored in mm)")
         self.unit_combo.currentTextChanged.connect(self.set_units)
         file_tb.addWidget(self.unit_combo)
+        file_tb.addWidget(QLabel(" Theme: "))
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems([n.title() for n in CHOICES])
+        self.theme_combo.currentTextChanged.connect(lambda t: self.set_theme(t.lower()))
+        file_tb.addWidget(self.theme_combo)
 
         self.model_tb = QToolBar("Model")
         self.addToolBar(self.model_tb)
@@ -201,6 +209,15 @@ class MainWindow(QMainWindow):
             self.doc.units = name
             self.mark_dirty()
             self._apply_units()
+
+    def set_theme(self, name: str, save: bool = True):
+        self.view.theme = apply_choice(name)
+        self.theme_combo.blockSignals(True)
+        self.theme_combo.setCurrentText(name.title())
+        self.theme_combo.blockSignals(False)
+        if save:
+            QSettings("rcad", "rcad").setValue("theme", name)
+        self.view.update()
 
     def ask_length(self, title, label, mm_value, lo_mm=1e-6, hi_mm=1e6):
         """Prompt for a length in the current units; returns (value in mm, accepted)."""
