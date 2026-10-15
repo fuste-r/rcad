@@ -23,6 +23,7 @@ class Viewport(QOpenGLWidget):
         self.mesh: MeshData | None = None
         self.sketch: Sketch | None = None
         self.overlay_sketches: list[Sketch] = []  # sketches on visible layers, drawn faded
+        self.region_fill: list[tuple[np.ndarray, tuple]] = []  # (world triangles, RGBA) for highlighted regions
         self.sketch_sel: set[tuple[str, int]] = set()
         self.preview: list[np.ndarray] = []  # world-space polylines for rubber-banding
         self.sel_faces: set[int] = set()
@@ -270,10 +271,20 @@ class Viewport(QOpenGLWidget):
 
     def _draw_sketch(self):
         sk = self.sketch
-        if sk is None and not self.preview and not self.overlay_sketches:
+        if sk is None and not self.preview and not self.overlay_sketches and not self.region_fill:
             return
         GL.glDisable(GL.GL_LIGHTING)
         GL.glDisable(GL.GL_DEPTH_TEST)
+        if self.region_fill:
+            GL.glEnable(GL.GL_BLEND)
+            GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA)
+            for tris, color in self.region_fill:
+                GL.glColor4f(*color)
+                GL.glBegin(GL.GL_TRIANGLES)
+                for p in tris.reshape(-1, 3):
+                    GL.glVertex3f(*p)
+                GL.glEnd()
+            GL.glDisable(GL.GL_BLEND)
         for other in self.overlay_sketches:
             if other is not sk:
                 self._draw_sketch_geometry(other, set(), (0.45, 0.55, 0.75))

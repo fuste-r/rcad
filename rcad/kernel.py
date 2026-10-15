@@ -24,19 +24,22 @@ class Feature:
     face: tuple | None = None  # pushpull: (center xyz, normal xyz) of the picked planar face
     edges: list = field(default_factory=list)  # fillet/chamfer: midpoints of picked edges
     visible: bool = True  # layer toggle: sketches show/hide curves, other features are suppressed when off
+    profiles: list | None = None  # extrude: points inside the sketch regions to use; None = all regions
 
     def label(self) -> str:
         if self.kind == "sketch":
             return f"{self.name} [{self.sketch.status}]"
         if self.kind == "extrude":
-            return f"{'Cut' if self.cut else 'Extrude'} ({self.value:g}) of #{self.sketch_ref}"
+            part = f", {len(self.profiles)} region(s)" if self.profiles is not None else ""
+            return f"{'Cut' if self.cut else 'Extrude'} ({self.value:g}{part}) of #{self.sketch_ref}"
         if self.kind == "pushpull":
             return f"Push/Pull {self.value:+g}"
         return f"{self.kind.title()} {self.value:g} x{len(self.edges)}"
 
     def to_dict(self) -> dict:
         d = {"kind": self.kind, "name": self.name, "sketch_ref": self.sketch_ref, "value": self.value,
-             "cut": self.cut, "face": self.face, "edges": [list(e) for e in self.edges], "visible": self.visible}
+             "cut": self.cut, "face": self.face, "edges": [list(e) for e in self.edges], "visible": self.visible,
+             "profiles": self.profiles}
         if self.sketch:
             d["sketch"] = self.sketch.to_dict()
         return d
@@ -48,7 +51,7 @@ class Feature:
         return Feature(d["kind"], d.get("name", ""), Sketch.from_dict(d["sketch"]) if "sketch" in d else None,
                        d.get("sketch_ref", -1), d.get("value", 0.0), d.get("cut", False),
                        tuple(map(tuple, d["face"])) if d.get("face") else None,
-                       [tuple(e) for e in d.get("edges", [])], d.get("visible", True))
+                       [tuple(e) for e in d.get("edges", [])], d.get("visible", True), d.get("profiles"))
 
 
 @dataclass
@@ -166,9 +169,9 @@ class Document:
         if f.kind == "extrude":
             if not 0 <= f.sketch_ref < len(self.features) or self.features[f.sketch_ref].kind != "sketch":
                 raise ValueError("extrude has no valid sketch")
-            solid = self.features[f.sketch_ref].sketch.solid(f.value)
+            solid = self.features[f.sketch_ref].sketch.solid(f.value, f.profiles)
             if solid is None:
-                raise ValueError("sketch has no closed profile or distance is zero")
+                raise ValueError("sketch has no matching closed region or distance is zero")
             return self._combine(part, solid, f.cut)
         if f.kind == "pushpull":
             if part is None:

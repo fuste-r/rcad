@@ -119,10 +119,12 @@ class MainWindow(QMainWindow):
         self.sketch_tb = QToolBar("Sketch")
         self.addToolBar(Qt.TopToolBarArea, self.sketch_tb)
         group = QActionGroup(self)
+        self.tool_actions = {}
         for name, text in [("select", "Select"), ("line", "Line"), ("rect", "Rectangle"), ("circle", "Circle")]:
             a = self._act(text, lambda _=False, n=name: self.set_tool(n), checkable=True)
             group.addAction(a)
             a.setChecked(name == "select")
+            self.tool_actions[name] = a
             self.sketch_tb.addAction(a)
         self.sketch_tb.addSeparator()
         self.snap = QDoubleSpinBox()
@@ -132,16 +134,22 @@ class MainWindow(QMainWindow):
         self.snap.setToolTip("Grid snap (0 = off)")
         self.sketch_tb.addWidget(self.snap)
         self.sketch_tb.addSeparator()
+        self.sketch_tb.addAction(self._act("Delete selected", self.delete_selection, "Delete selected sketch items"))
+        self.sketch_tb.addAction(self._act("Delete constraint", self.delete_constraint))
+        self.sketch_tb.addSeparator()
+        self.sketch_tb.addAction(self._act("Extrude", self.extrude_from_sketch,
+                                           "Extrude the highlighted regions (Select tool: click a region to highlight it)"))
+        self.sketch_tb.addAction(self._act("Finish Sketch", self.finish_sketch))
+
+        self.addToolBarBreak(Qt.TopToolBarArea)
+        self.constraint_tb = QToolBar("Constraints")
+        self.addToolBar(Qt.TopToolBarArea, self.constraint_tb)
         for text, kind in [("Horizontal", "horizontal"), ("Vertical", "vertical"), ("Coincident", "coincident"),
                            ("Parallel", "parallel"), ("Perpend.", "perpendicular"), ("Equal", "equal"),
                            ("Distance", "distance"), ("Diameter", "diameter"), ("Fixed", "fixed"),
                            ("Point on line", "point_on_line")]:
-            self.sketch_tb.addAction(self._act(text, lambda _=False, k=kind: self.add_constraint(k),
-                                               f"Add a {kind} constraint to the selection"))
-        self.sketch_tb.addSeparator()
-        self.sketch_tb.addAction(self._act("Delete selected", self.delete_selection, "Delete selected sketch items"))
-        self.sketch_tb.addAction(self._act("Delete constraint", self.delete_constraint))
-        self.sketch_tb.addAction(self._act("Finish Sketch", self.finish_sketch))
+            self.constraint_tb.addAction(self._act(text, lambda _=False, k=kind: self.add_constraint(k),
+                                                   f"Add a {kind} constraint to the selection"))
 
     # ---- state / refresh
     def set_mode(self, mode):
@@ -149,6 +157,7 @@ class MainWindow(QMainWindow):
         sketching = mode == "sketch"
         self.model_tb.setVisible(not sketching)
         self.sketch_tb.setVisible(sketching)
+        self.constraint_tb.setVisible(sketching)
         self.constraint_dock.setVisible(sketching)
         self.view.left_orbits = not sketching
         self.view.camera.ortho = sketching
@@ -156,6 +165,8 @@ class MainWindow(QMainWindow):
         self.view.sketch_sel.clear()
         self.view.preview = []
         self.pending = None
+        self.hover_region = None
+        self._update_regions()
 
     def mark_dirty(self, dirty=True):
         self.dirty = dirty
@@ -256,15 +267,26 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def set_tool(self, name):
+        self.tool_actions[name].setChecked(True)
         self.tool = name
-        self.cancel()
+        self.pending = None
+        self.hover_region = None
+        self.view.preview = []
+        self.view.sketch_sel.clear()
+        self._update_regions()
 
     def cancel(self):
+        if self.mode == "sketch" and self.pending is None and self.tool != "select":
+            self.set_tool("select")  # Esc with nothing in progress leaves the drawing tool
+            return
         self.pending = None
         self.view.preview = []
         self.view.sketch_sel.clear()
         self.view.sel_faces.clear()
         self.view.sel_edges.clear()
+        if self.mode == "sketch":
+            self.sketch.selection = []
+            self._update_regions()
         self.view.update()
 
     def _snap(self, x, y):
@@ -278,13 +300,25 @@ class MainWindow(QMainWindow):
         g = self.snap.value()
         return None, ((round(uv[0] / g) * g, round(uv[1] / g) * g) if g > 0 else uv)
 
+    def _update_regions(self):
+        """Refresh the filled highlight for selected and hovered sketch regions."""
+        fills = []
+        if self.mode == "sketch":
+            sk = self.sketch
+            chosen = sk.selected_regions()
+            fills = [(sk.region_triangles(i), (1.0, 0.55, 0.15, 0.45)) for i in sorted(chosen)]
+            if self.hover_region is not None and self.hover_region not in chosen:
+                fills.append((sk.region_triangles(self.hover_region), (0.95, 0.9, 0.3, 0.35)))
+        self.view.region_fill = fills
+        self.view.update()
+
     def _solve_sketch(self):
         ok = self.sketch.solve()
         if not ok:
             self.statusBar().showMessage(f"Solver: {self.sketch.status}", 6000)
         self.refresh_constraints()
         self.mark_dirty()
-        self.view.update()
+        self._update_regions()
         return ok
 
     def _sketch_click(self, x, y, mods):
@@ -292,15 +326,20 @@ class MainWindow(QMainWindow):
         if self.tool == "select":
             hit = self.view.pick_sketch(x, y)
             sel = self.view.sketch_sel
+            multi = bool(mods & Qt.ControlModifier)
             if hit is None:
-                if not mods & Qt.ControlModifier:
+                uv = self.view.sketch_uv(x, y)
+                if not multi:
                     sel.clear()
-            elif mods & Qt.ControlModifier:
+                if uv is not None:
+                    sk.toggle_region(uv[0], uv[1], multi)
+                    self.mark_dirty()
+            elif multi:
                 sel.symmetric_difference_update({hit})
             else:
                 sel.clear()
                 sel.add(hit)
-            self.view.update()
+            self._update_regions()
             return
         snap = self._snap(x, y)
         if snap is None:
@@ -322,25 +361,23 @@ class MainWindow(QMainWindow):
         elif self.tool == "rect":
             if self.pending is None:
                 self.pending = (pi, uv)
-            else:
-                (u0, v0), (u1, v1) = self.pending[1], uv
-                if abs(u1 - u0) > 1e-9 and abs(v1 - v0) > 1e-9:
-                    sk.add_rect(u0, v0, u1, v1)
-                    self._solve_sketch()
-                self.pending = None
-                self.view.preview = []
+                return
+            (u0, v0), (u1, v1) = self.pending[1], uv
+            if abs(u1 - u0) > 1e-9 and abs(v1 - v0) > 1e-9:
+                sk.add_rect(u0, v0, u1, v1)
+                self._solve_sketch()
+            self.set_tool("select")  # so the new region can be highlighted right away
         elif self.tool == "circle":
             if self.pending is None:
                 self.pending = (pi, uv)
-            else:
-                c_idx, c_uv = self.pending
-                r = math.dist(c_uv, uv)
-                if r > 1e-9:
-                    c = c_idx if c_idx is not None else sk.add_point(*c_uv)
-                    sk.add_circle(c, r)
-                    self._solve_sketch()
-                self.pending = None
-                self.view.preview = []
+                return
+            c_idx, c_uv = self.pending
+            r = math.dist(c_uv, uv)
+            if r > 1e-9:
+                c = c_idx if c_idx is not None else sk.add_point(*c_uv)
+                sk.add_circle(c, r)
+                self._solve_sketch()
+            self.set_tool("select")
 
     def _update_preview(self, x, y):
         pl = self.sketch.plane
@@ -460,6 +497,13 @@ class MainWindow(QMainWindow):
         if self.mode == "sketch":
             if self.tool != "select":
                 self._update_preview(x, y)
+                return
+            uv = self.view.sketch_uv(x, y)
+            near = self.view.pick_sketch(x, y) is not None
+            region = None if uv is None or near else self.sketch.region_at(*uv)
+            if region != self.hover_region:
+                self.hover_region = region
+                self._update_regions()
             return
         edge = self.view.pick_edge(x, y)
         face = None if edge is not None else self.view.pick_face(x, y)
@@ -479,9 +523,31 @@ class MainWindow(QMainWindow):
         if i is None:
             QMessageBox.information(self, "Extrude", "Create a sketch with a closed profile first.")
             return
+        sk = self.doc.features[i].sketch
+        if len(sk.regions()) > 1 and not sk.selected_regions():
+            self.enter_sketch(i)
+            self.statusBar().showMessage("Click the regions to extrude (Ctrl+click for several), then press Extrude. "
+                                         "With nothing highlighted, every region is extruded.", 15000)
+            return
+        self._extrude_sketch(i)
+
+    def extrude_from_sketch(self):
+        i = self.sketch_index
+        self.finish_sketch()
+        self._extrude_sketch(i)
+
+    def _extrude_sketch(self, i: int):
+        sk = self.doc.features[i].sketch
+        if not sk.regions():
+            QMessageBox.information(self, "Extrude", "The sketch has no closed profile.")
+            return
+        chosen = sorted(sk.selected_regions())
+        profiles = [list(next(p for p in sk.selection if sk.region_at(*p) == r)) for r in chosen] or None
         dlg = ExtrudeDialog(self, show_cut=self.doc.part is not None)
+        dlg.setWindowTitle(f"Extrude {len(profiles)} highlighted region(s)" if profiles else "Extrude all regions")
         if dlg.exec():
-            self.commit(Feature("extrude", sketch_ref=i, value=dlg.dist.value(), cut=dlg.cut.isChecked()))
+            self.commit(Feature("extrude", sketch_ref=i, value=dlg.dist.value(), cut=dlg.cut.isChecked(),
+                                profiles=profiles))
 
     def pushpull(self):
         if len(self.view.sel_faces) != 1:

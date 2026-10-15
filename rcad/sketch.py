@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 from dataclasses import asdict, dataclass, field
 
+import numpy as np
 from build123d import Face, Plane, Shape, Solid, Vector, Wire
 from py_slvs import slvs
 
@@ -76,6 +77,7 @@ class Sketch:
     lines: list[tuple[int, int]] = field(default_factory=list)
     circles: list[tuple[int, float]] = field(default_factory=list)  # (center point, radius)
     constraints: list[Constraint] = field(default_factory=list)
+    selection: list[tuple[float, float]] = field(default_factory=list)  # points inside the highlighted regions
     status: str = "unsolved"
     dof: int = -1
 
@@ -212,37 +214,74 @@ class Sketch:
                 out.append(("poly", [tuple(self.points[v]) for v in verts[:-1]]))
         return out
 
-    def solid(self, distance: float) -> Shape | None:
-        """Extrude all closed profiles along the plane normal; nested loops alternate add/cut."""
+    def regions(self) -> list[tuple[tuple, list[tuple]]]:
+        """Fillable areas as (outer loop, hole loops): even-depth loops with their direct children as holes."""
         loops = self.loops()
-        if not loops or abs(distance) < 1e-9:
+        areas = [_area(l) for l in loops]
+        containers = [[j for j, o in enumerate(loops) if j != i and areas[j] > areas[i] and _inside(l, o)]
+                      for i, l in enumerate(loops)]
+        parent = [min(c, key=lambda j: areas[j]) if c else None for c in containers]
+        return [(loops[i], [loops[j] for j in range(len(loops)) if parent[j] == i])
+                for i in range(len(loops)) if len(containers[i]) % 2 == 0]
+
+    def region_at(self, u: float, v: float) -> int | None:
+        """Index into regions() of the filled area under (u, v); None over empty space or holes."""
+        regs = self.regions()
+        best, best_area = None, math.inf
+        for i, (outer, holes) in enumerate(regs):
+            if _contains(outer, (u, v)) and not any(_contains(h, (u, v)) for h in holes):
+                a = _area(outer)
+                if a < best_area:
+                    best, best_area = i, a
+        return best
+
+    def selected_regions(self) -> set[int]:
+        return {i for p in self.selection if (i := self.region_at(*p)) is not None}
+
+    def toggle_region(self, u: float, v: float, additive: bool) -> None:
+        idx = self.region_at(u, v)
+        if idx is None:
+            if not additive:
+                self.selection = []
+            return
+        if idx in self.selected_regions():
+            self.selection = [p for p in self.selection if self.region_at(*p) != idx]
+        else:
+            self.selection = (self.selection if additive else []) + [(u, v)]
+
+    def _region_face(self, region) -> Face:
+        outer, holes = region
+        return Face(_loop_wire(outer), [_loop_wire(h) for h in holes])
+
+    def region_triangles(self, index: int) -> np.ndarray:
+        """World-space triangles (N,3,3) filling region `index`, for highlighting."""
+        face = self.plane.b123d().from_local_coords(self._region_face(self.regions()[index]))
+        verts, tris = face.tessellate(0.05)
+        v = np.array([[p.X, p.Y, p.Z] for p in verts], dtype=float)
+        return v[np.array(tris, dtype=int)].reshape(-1, 3, 3)
+
+    def solid(self, distance: float, profiles: list | None = None) -> Shape | None:
+        """Extrude filled regions along the plane normal; `profiles` (points in the sketch) limits which ones."""
+        regs = self.regions()
+        if profiles is not None:
+            keep = {i for p in profiles if (i := self.region_at(*p)) is not None}
+            regs = [r for i, r in enumerate(regs) if i in keep]
+        if not regs or abs(distance) < 1e-9:
             return None
-        depths = [sum(_inside(l, o) for o in loops if o is not l and _area(o) > _area(l)) for l in loops]
         pl = self.plane.b123d()
         n = self.plane.normal
         d = Vector(float(n[0] * distance), float(n[1] * distance), float(n[2] * distance))
         result = None
-        for depth in sorted(set(depths)):
-            for loop, dp in zip(loops, depths):
-                if dp != depth:
-                    continue
-                if loop[0] == "circle":
-                    u, v, r = loop[1]
-                    wire = Wire.make_circle(r, Plane(origin=(u, v, 0)))
-                else:
-                    wire = Wire.make_polygon([Vector(float(u), float(v), 0.0) for u, v in loop[1]])
-                solid = Solid.extrude(pl.from_local_coords(Face(wire)), d)
-                if result is None:
-                    result = solid
-                else:
-                    result = result.fuse(solid) if depth % 2 == 0 else result.cut(solid)
+        for region in regs:
+            solid = Solid.extrude(pl.from_local_coords(self._region_face(region)), d)
+            result = solid if result is None else result.fuse(solid)
         return result
 
     # -- persistence
     def to_dict(self) -> dict:
         return {"plane": asdict(self.plane), "points": self.points, "lines": [list(l) for l in self.lines],
                 "circles": [list(c) for c in self.circles],
-                "constraints": [asdict(c) for c in self.constraints]}
+                "constraints": [asdict(c) for c in self.constraints], "selection": [list(p) for p in self.selection]}
 
     @staticmethod
     def from_dict(d: dict) -> "Sketch":
@@ -252,6 +291,7 @@ class Sketch:
         sk.lines = [tuple(l) for l in d["lines"]]
         sk.circles = [tuple(c) for c in d["circles"]]
         sk.constraints = [Constraint(**c) for c in d["constraints"]]
+        sk.selection = [tuple(p) for p in d.get("selection", [])]
         return sk
 
 
@@ -267,7 +307,11 @@ def _probe(loop):
 
 
 def _inside(loop, outer) -> bool:
-    x, y = _probe(loop)
+    return _contains(outer, _probe(loop))
+
+
+def _contains(outer, pt) -> bool:
+    x, y = pt
     if outer[0] == "circle":
         u, v, r = outer[1]
         return math.hypot(x - u, y - v) < r
@@ -277,3 +321,10 @@ def _inside(loop, outer) -> bool:
         if (y1 > y) != (y2 > y) and x < (x2 - x1) * (y - y1) / (y2 - y1) + x1:
             inside = not inside
     return inside
+
+
+def _loop_wire(loop) -> Wire:
+    if loop[0] == "circle":
+        u, v, r = loop[1]
+        return Wire.make_circle(r, Plane(origin=(u, v, 0)))
+    return Wire.make_polygon([Vector(float(u), float(v), 0.0) for u, v in loop[1]])

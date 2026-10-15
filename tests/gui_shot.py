@@ -32,10 +32,12 @@ def shot(name):
 
 def step2():
     shot("/tmp/shot_model.png")
-    top = [i for i, fc in enumerate(w.doc.mesh.faces) if fc.normal is not None and fc.normal[2] > 0.99][0]
-    w.view.sel_faces = {top}
-    w.view.update()
-    QTimer.singleShot(500, lambda: (shot("/tmp/shot_selected.png"), a.quit()))
+    w.enter_sketch(0)
+    w.sketch.toggle_region(10, 5, False)
+    w.sketch.toggle_region(60, 20, True)
+    w.hover_region = None
+    w._update_regions()
+    QTimer.singleShot(700, lambda: (shot("/tmp/shot_regions.png"), a.quit()))
 
 
 QTimer.singleShot(1500, step2)
