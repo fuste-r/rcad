@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import numpy as np
 from OpenGL import GL
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QImage, QPainter
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 
+from . import viewcube
 from .camera import Camera, point_segment_dist, ray_plane, ray_triangles
 from .kernel import MeshData
 from .sketch import Sketch
@@ -22,6 +24,10 @@ class Viewport(QOpenGLWidget):
         self.setMouseTracking(True)
         self.camera = Camera()
         self.theme: Theme = LIGHT
+        self.cube_hover: str | None = None
+        self._cube_press = False
+        self._cube_tex: dict[str, int] = {}
+        self._cube_tex_key = None
         self.unit_mm = 1.0  # millimetres per display unit; the grid steps in whole display units
         self.mesh: MeshData | None = None
         self.sketch: Sketch | None = None
@@ -196,6 +202,7 @@ class Viewport(QOpenGLWidget):
         self._draw_grid()
         self._draw_model()
         self._draw_sketch()
+        self._draw_cube()
 
     def _grid_step(self):
         return self.unit_mm * 10.0 ** np.floor(np.log10(self.camera.dist / 4 / self.unit_mm))
@@ -325,17 +332,122 @@ class Viewport(QOpenGLWidget):
         GL.glEnable(GL.GL_DEPTH_TEST)
         GL.glEnable(GL.GL_LIGHTING)
 
+    # -- orientation cube
+    def _cube_rect(self):
+        return viewcube.rect(self.width())
+
+    def _draw_cube(self):
+        w, h, ratio = self.width(), self.height(), self.devicePixelRatio()
+        x, y, s = self._cube_rect()
+        rot = viewcube.rotation(self.camera)
+        t = self.theme
+        GL.glViewport(int(x * ratio), int((h - y - s) * ratio), int(s * ratio), int(s * ratio))
+        GL.glMatrixMode(GL.GL_PROJECTION)
+        GL.glLoadIdentity()
+        GL.glOrtho(-viewcube.EXTENT, viewcube.EXTENT, -viewcube.EXTENT, viewcube.EXTENT, -10, 10)
+        GL.glMatrixMode(GL.GL_MODELVIEW)
+        m = np.eye(4)
+        m[:3, :3] = rot
+        GL.glLoadMatrixf(m.T.astype(np.float32))
+        GL.glClear(GL.GL_DEPTH_BUFFER_BIT)
+        GL.glDisable(GL.GL_LIGHTING)
+        GL.glEnable(GL.GL_POLYGON_OFFSET_FILL)
+        GL.glPolygonOffset(1.0, 1.0)
+        for name, (_, _, corners) in viewcube.FACES.items():
+            GL.glColor3f(*(t.cube_hover if name == self.cube_hover else t.cube_face))
+            GL.glBegin(GL.GL_QUADS)
+            for c in corners:
+                GL.glVertex3f(*c)
+            GL.glEnd()
+        GL.glDisable(GL.GL_POLYGON_OFFSET_FILL)
+        GL.glColor3f(*t.cube_edge)
+        GL.glLineWidth(1.5)
+        for _, _, corners in viewcube.FACES.values():
+            GL.glBegin(GL.GL_LINE_LOOP)
+            for c in corners:
+                GL.glVertex3f(*c)
+            GL.glEnd()
+        GL.glLineWidth(1)
+        self._draw_cube_labels()
+        GL.glEnable(GL.GL_LIGHTING)
+        GL.glViewport(0, 0, int(w * ratio), int(h * ratio))
+
+    def _cube_textures(self) -> dict:
+        """One RGBA label texture per face, rebuilt when the theme changes."""
+        if self._cube_tex_key == self.theme.name:
+            return self._cube_tex
+        if self._cube_tex:
+            GL.glDeleteTextures(list(self._cube_tex.values()))
+        self._cube_tex = {}
+        for name in viewcube.FACES:
+            img = QImage(256, 128, QImage.Format_RGBA8888)
+            img.fill(Qt.transparent)
+            painter = QPainter(img)
+            painter.setRenderHint(QPainter.TextAntialiasing)
+            font = QFont()
+            font.setPixelSize(52)
+            font.setBold(True)
+            painter.setFont(font)
+            painter.setPen(QColor.fromRgbF(*self.theme.cube_text))
+            painter.drawText(QRectF(0, 0, 256, 128), Qt.AlignCenter, name)
+            painter.end()
+            tex = GL.glGenTextures(1)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, tex)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_LINEAR)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_LINEAR)
+            GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+            GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGBA, 256, 128, 0, GL.GL_RGBA, GL.GL_UNSIGNED_BYTE,
+                            bytes(img.constBits()))
+            self._cube_tex[name] = tex
+        self._cube_tex_key = self.theme.name
+        return self._cube_tex
+
+    def _draw_cube_labels(self):
+        textures = self._cube_textures()
+        GL.glEnable(GL.GL_TEXTURE_2D)
+        GL.glEnable(GL.GL_BLEND)
+        GL.glBlendFuncSeparate(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA, GL.GL_ZERO, GL.GL_ONE)
+        GL.glColor3f(1, 1, 1)
+        for name, (normal, right, _) in viewcube.FACES.items():
+            n, r = np.array(normal, float), np.array(right, float)
+            up = np.cross(n, r)  # the camera's up when looking straight at this face
+            c = n * 1.02
+            GL.glBindTexture(GL.GL_TEXTURE_2D, textures[name])
+            GL.glBegin(GL.GL_QUADS)
+            for (u, v), (sx, sy) in (((0, 1), (-1, -1)), ((1, 1), (1, -1)), ((1, 0), (1, 1)), ((0, 0), (-1, 1))):
+                GL.glTexCoord2f(u, v)
+                GL.glVertex3f(*(c + r * sx * 0.85 + up * sy * 0.425))
+            GL.glEnd()
+        GL.glBindTexture(GL.GL_TEXTURE_2D, 0)
+        GL.glDisable(GL.GL_TEXTURE_2D)
+        GL.glDisable(GL.GL_BLEND)
+
+    def _snap_view(self, face: str):
+        normal, right = viewcube.view_for(face)
+        self.camera.look_at_plane(self.camera.target, normal, right)
+        self.update()
+
     # -- mouse
     def mousePressEvent(self, e):
+        p = e.position()
+        self._cube_press = e.button() == Qt.LeftButton and viewcube.inside(p.x(), p.y(), self._cube_rect())
         self._press = (e.position(), e.button(), e.modifiers())
         self._last = e.position()
         self._dragged = False
 
     def mouseMoveEvent(self, e):
         p = e.position()
-        self.hovered.emit(p.x(), p.y())
         if self._press is None:
+            r = self._cube_rect()
+            over = viewcube.inside(p.x(), p.y(), r)
+            hover = viewcube.pick(viewcube.rotation(self.camera), p.x(), p.y(), r) if over else None
+            if hover != self.cube_hover:
+                self.cube_hover = hover
+                self.update()
+            if not over:
+                self.hovered.emit(p.x(), p.y())
             return
+        self.hovered.emit(p.x(), p.y())
         pos0, btn, mods = self._press
         d = p - self._last
         if (p - pos0).manhattanLength() > DRAG_PX:
@@ -344,7 +456,8 @@ class Viewport(QOpenGLWidget):
         if not self._dragged:
             return
         alt = bool(mods & Qt.AltModifier)
-        if btn == Qt.RightButton or (btn == Qt.LeftButton and (self.left_orbits or alt) and not mods & Qt.ShiftModifier):
+        if btn == Qt.RightButton or (btn == Qt.LeftButton and (self.left_orbits or alt or self._cube_press)
+                                     and not mods & Qt.ShiftModifier):
             self.camera.orbit(-d.x() * 0.4, -d.y() * 0.4)
         elif btn == Qt.MiddleButton or (btn == Qt.LeftButton and mods & Qt.ShiftModifier):
             self.camera.pan(d.x(), d.y(), self.height())
@@ -353,8 +466,14 @@ class Viewport(QOpenGLWidget):
     def mouseReleaseEvent(self, e):
         if self._press is not None and not self._dragged:
             p = e.position()
-            self.clicked.emit(p.x(), p.y(), self._press[1], self._press[2])
+            if self._cube_press:
+                face = viewcube.pick(viewcube.rotation(self.camera), p.x(), p.y(), self._cube_rect())
+                if face:
+                    self._snap_view(face)
+            else:
+                self.clicked.emit(p.x(), p.y(), self._press[1], self._press[2])
         self._press = None
+        self._cube_press = False
 
     def wheelEvent(self, e):
         self.camera.zoom(e.angleDelta().y() / 120)

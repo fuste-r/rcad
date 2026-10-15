@@ -40,6 +40,7 @@ On Wayland with NVIDIA, if the OpenGL context fails to create, try `QT_QPA_PLATF
 | Orbit (3D view) | left or right drag |
 | Pan | middle drag, or Shift + left drag |
 | Zoom | mouse wheel |
+| Standard view (Top, Bottom, Front, Back, Left, Right) | click a face of the cube in the top-right corner; drag the cube to orbit |
 | Multi-select | Ctrl + click |
 | Cancel / clear selection | Esc |
 

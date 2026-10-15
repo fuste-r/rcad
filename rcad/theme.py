@@ -24,17 +24,25 @@ class Theme:
     sketch_faded: RGB
     sketch_select: RGB
     preview: RGB
+    cube_face: RGB
+    cube_hover: RGB
+    cube_edge: RGB
+    cube_text: RGB
 
 
 LIGHT = Theme("light", background=(0.93, 0.94, 0.96), grid=(0.78, 0.8, 0.83), model=(0.62, 0.72, 0.86),
               face_hover=(0.85, 0.85, 0.5), face_select=(1.0, 0.6, 0.2), edge=(0.15, 0.15, 0.2),
               edge_hover=(0.1, 0.5, 0.9), edge_select=(0.9, 0.1, 0.1), sketch=(0.05, 0.25, 0.75),
-              sketch_faded=(0.45, 0.55, 0.75), sketch_select=(1.0, 0.35, 0.1), preview=(0.4, 0.4, 0.4))
+              sketch_faded=(0.45, 0.55, 0.75), sketch_select=(1.0, 0.35, 0.1), preview=(0.4, 0.4, 0.4),
+              cube_face=(0.97, 0.97, 0.98), cube_hover=(1.0, 0.8, 0.5), cube_edge=(0.35, 0.37, 0.42),
+              cube_text=(0.15, 0.16, 0.2))
 
 DARK = Theme("dark", background=(0.12, 0.13, 0.16), grid=(0.25, 0.27, 0.32), model=(0.42, 0.52, 0.68),
              face_hover=(0.62, 0.62, 0.3), face_select=(0.95, 0.55, 0.15), edge=(0.85, 0.87, 0.92),
              edge_hover=(0.3, 0.7, 1.0), edge_select=(1.0, 0.3, 0.3), sketch=(0.45, 0.7, 1.0),
-             sketch_faded=(0.3, 0.4, 0.55), sketch_select=(1.0, 0.55, 0.2), preview=(0.7, 0.7, 0.7))
+             sketch_faded=(0.3, 0.4, 0.55), sketch_select=(1.0, 0.55, 0.2), preview=(0.7, 0.7, 0.7),
+             cube_face=(0.3, 0.32, 0.38), cube_hover=(0.75, 0.5, 0.2), cube_edge=(0.7, 0.72, 0.78),
+             cube_text=(0.95, 0.96, 0.98))
 
 THEMES = {t.name: t for t in (LIGHT, DARK)}
 CHOICES = ["system", "light", "dark"]
