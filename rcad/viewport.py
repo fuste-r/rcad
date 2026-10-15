@@ -367,6 +367,14 @@ class Viewport(QOpenGLWidget):
             for c in corners:
                 GL.glVertex3f(*c)
             GL.glEnd()
+        GL.glEnable(GL.GL_POINT_SMOOTH)
+        GL.glPointSize(10 * ratio)
+        GL.glBegin(GL.GL_POINTS)
+        for name in viewcube.visible_corners(rot):
+            GL.glColor3f(*(t.cube_hover if name == self.cube_hover else t.cube_edge))
+            GL.glVertex3f(*(np.asarray(viewcube.CORNERS[name], float) * 1.025))
+        GL.glEnd()
+        GL.glDisable(GL.GL_POINT_SMOOTH)
         GL.glLineWidth(1)
         self._draw_cube_labels()
         GL.glEnable(GL.GL_LIGHTING)

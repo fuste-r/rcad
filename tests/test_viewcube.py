@@ -60,6 +60,20 @@ def test_directions_match_the_labels():
         assert offset(side, (0, 0, 1))[1] < 0
 
 
+@pytest.mark.parametrize("name", viewcube.CORNERS)
+def test_each_corner_selects_its_isometric_view(name):
+    normal, right = viewcube.view_for(name)
+    cam = Camera()
+    cam.look_at_plane(cam.target, normal, right)
+    rot = viewcube.rotation(cam)
+    r = (0, 0, viewcube.SIZE)
+    x, y = viewcube.to_screen(rot, np.asarray(viewcube.CORNERS[name]) * 1.025, r)
+
+    assert viewcube.pick(rot, x, y, r) == name
+    assert np.allclose(cam.back, np.asarray(viewcube.CORNERS[name]) / np.sqrt(3))
+    assert np.dot(cam.up, (0, 0, 1)) > 0
+
+
 @pytest.fixture(scope="module")
 def qapp():
     return QApplication.instance() or QApplication([])
@@ -99,6 +113,20 @@ def test_clicking_the_cube_snaps_the_view(qapp):
 
     move(vp, 50, 400)
     assert vp.cube_hover is None
+
+
+@pytest.mark.parametrize("name", viewcube.CORNERS)
+def test_clicking_a_corner_snaps_to_isometric_view(qapp, name):
+    vp = Viewport()
+    vp.resize(800, 600)
+    normal, right = viewcube.view_for(name)
+    vp.camera.look_at_plane(vp.camera.target, normal, right)
+    rot = viewcube.rotation(vp.camera)
+    x, y = viewcube.to_screen(rot, np.asarray(viewcube.CORNERS[name]) * 1.025, vp._cube_rect())
+
+    click(vp, x, y)
+
+    assert np.allclose(vp.camera.back, normal)
 
 
 def test_cube_follows_camera_orbit(qapp):

@@ -16,6 +16,17 @@ FACES = {
     "Right": ((1, 0, 0), (0, 1, 0), [(1, -1, -1), (1, 1, -1), (1, 1, 1), (1, -1, 1)]),
     "Left": ((-1, 0, 0), (0, -1, 0), [(-1, 1, -1), (-1, -1, -1), (-1, -1, 1), (-1, 1, 1)]),
 }
+CORNERS = {
+    "Top-Front-Right": (1, -1, 1),
+    "Top-Front-Left": (-1, -1, 1),
+    "Top-Back-Right": (1, 1, 1),
+    "Top-Back-Left": (-1, 1, 1),
+    "Bottom-Front-Right": (1, -1, -1),
+    "Bottom-Front-Left": (-1, -1, -1),
+    "Bottom-Back-Right": (1, 1, -1),
+    "Bottom-Back-Left": (-1, 1, -1),
+}
+CORNER_RADIUS = 9
 
 
 def rect(widget_width: int) -> tuple[int, int, int]:
@@ -42,6 +53,15 @@ def visible_faces(rot: np.ndarray) -> list[str]:
     return [n for n, (normal, _, _) in FACES.items() if (rot @ np.asarray(normal, float))[2] > 1e-6]
 
 
+def visible_corners(rot: np.ndarray) -> list[str]:
+    """Cube vertices on the visible side of the view, suitable for corner targets."""
+    direction = rot[2]
+    active = np.abs(direction) > 1e-6
+    required = min(2, int(active.sum()))
+    return [name for name, point in CORNERS.items()
+            if np.count_nonzero(np.asarray(point)[active] * direction[active] > 0) >= required]
+
+
 def _in_polygon(px: float, py: float, poly: list[tuple[float, float]]) -> bool:
     inside_ = False
     for i in range(len(poly)):
@@ -52,6 +72,15 @@ def _in_polygon(px: float, py: float, poly: list[tuple[float, float]]) -> bool:
 
 
 def pick(rot: np.ndarray, x: float, y: float, r: tuple[int, int, int]) -> str | None:
+    corner_hits = []
+    for name in visible_corners(rot):
+        point = np.asarray(CORNERS[name], float) * 1.025
+        px, py = to_screen(rot, point, r)
+        distance = np.hypot(px - x, py - y)
+        if distance <= CORNER_RADIUS:
+            corner_hits.append((distance, -(rot @ point)[2], name))
+    if corner_hits:
+        return min(corner_hits)[2]
     for name in visible_faces(rot):
         if _in_polygon(x, y, [to_screen(rot, c, r) for c in FACES[name][2]]):
             return name
@@ -59,6 +88,12 @@ def pick(rot: np.ndarray, x: float, y: float, r: tuple[int, int, int]) -> str | 
 
 
 def view_for(name: str):
-    """(normal, camera right) for looking at the named face head-on."""
+    """(normal, camera right) for looking at a face or isometric corner."""
+    if name in CORNERS:
+        normal = np.asarray(CORNERS[name], float)
+        normal /= np.linalg.norm(normal)
+        right = np.cross((0, 0, 1), normal)
+        right /= np.linalg.norm(right)
+        return normal, right
     normal, right, _ = FACES[name]
     return np.array(normal, float), np.array(right, float)
