@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Local output (screenshots, exports); project files stay tracked only under examples/
+/out/
+*.step
+*.stp
+*.stl
+!examples/**/*.step
+!examples/**/*.stp
+!examples/**/*.stl
