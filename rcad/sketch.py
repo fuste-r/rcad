@@ -8,6 +8,8 @@ import numpy as np
 from build123d import Face, Plane, Shape, Solid, Vector, Wire
 from py_slvs import slvs
 
+from .units import MM, Unit
+
 BASE_GROUP, SKETCH_GROUP = 1, 2
 
 # kind -> (what refs point at, needs a dimension value)
@@ -65,8 +67,8 @@ class Constraint:
     refs: list[int]
     value: float | None = None
 
-    def label(self) -> str:
-        v = f" = {self.value:g}" if self.value is not None else ""
+    def label(self, unit: Unit = MM) -> str:
+        v = f" = {unit.fmt(self.value)}" if self.value is not None else ""
         return f"{self.kind} {self.refs}{v}"
 
 

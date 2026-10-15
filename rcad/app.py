@@ -15,19 +15,23 @@ from PySide6.QtWidgets import (
 from .kernel import Document, Feature
 from .camera import ray_plane
 from .sketch import CONSTRAINT_KINDS, Constraint, Sketch, SketchPlane, standard_plane
+from .units import MM, UNITS
 from .viewport import Viewport
 
 FILE_FILTER = "rCad project (*.rcad)"
 
 
 class ExtrudeDialog(QDialog):
-    def __init__(self, parent, distance=10.0, auto=True, cut=False, show_mode=True):
+    def __init__(self, parent, distance=10.0, auto=True, cut=False, show_mode=True, unit=MM):
         super().__init__(parent)
+        self.unit = unit
         self.setWindowTitle("Extrude")
         self.dist = QDoubleSpinBox()
         self.dist.setRange(-1e5, 1e5)
-        self.dist.setDecimals(3)
-        self.dist.setValue(distance)
+        self.dist.setDecimals(unit.decimals)
+        self.dist.setSuffix(f" {unit.name}")
+        self.dist.setValue(unit.from_mm(distance))
+        self._orig, self._shown = distance, self.dist.value()
         self.mode = QComboBox()
         self.mode.addItems(["Auto (into the body = cut, away = add)", "Add (join)", "Cut (subtract)"])
         self.mode.setCurrentIndex(0 if auto else 2 if cut else 1)
@@ -39,6 +43,12 @@ class ExtrudeDialog(QDialog):
         box.accepted.connect(self.accept)
         box.rejected.connect(self.reject)
         form.addRow(box)
+
+    @property
+    def distance_mm(self) -> float:
+        if self.dist.value() == self._shown:
+            return self._orig  # untouched: avoid display-rounding drift
+        return self.unit.to_mm(self.dist.value())
 
     @property
     def auto(self) -> bool:
@@ -89,7 +99,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence(Qt.Key_Escape), self, self.cancel)
         self.resize(1300, 800)
         self.set_mode("model")
-        self.refresh()
+        self._apply_units()
 
     # ---- UI construction
     def _act(self, text, slot, tip="", shortcut=None, checkable=False):
@@ -110,6 +120,13 @@ class MainWindow(QMainWindow):
             a = self._act(text, slot, shortcut=sc)
             file_tb.addAction(a)
             self.addAction(a)
+        file_tb.addSeparator()
+        file_tb.addWidget(QLabel(" Units: "))
+        self.unit_combo = QComboBox()
+        self.unit_combo.addItems(list(UNITS))
+        self.unit_combo.setToolTip("Display and input units (geometry is stored in mm)")
+        self.unit_combo.currentTextChanged.connect(self.set_units)
+        file_tb.addWidget(self.unit_combo)
 
         self.model_tb = QToolBar("Model")
         self.addToolBar(self.model_tb)
@@ -163,6 +180,37 @@ class MainWindow(QMainWindow):
             self.constraint_tb.addAction(self._act(text, lambda _=False, k=kind: self.add_constraint(k),
                                                    f"Add a {kind} constraint to the selection"))
 
+    # ---- units
+    @property
+    def unit(self):
+        return UNITS[self.doc.units]
+
+    def _apply_units(self):
+        u = self.unit
+        self.unit_combo.blockSignals(True)
+        self.unit_combo.setCurrentText(u.name)
+        self.unit_combo.blockSignals(False)
+        self.snap.setDecimals(u.decimals)
+        self.snap.setSuffix(f" {u.name}")
+        self.snap.setValue(u.snap)
+        self.view.unit_mm = u.mm
+        self.refresh()
+
+    def set_units(self, name: str):
+        if name in UNITS and name != self.doc.units:
+            self.doc.units = name
+            self.mark_dirty()
+            self._apply_units()
+
+    def ask_length(self, title, label, mm_value, lo_mm=1e-6, hi_mm=1e6):
+        """Prompt for a length in the current units; returns (value in mm, accepted)."""
+        u = self.unit
+        v, ok = QInputDialog.getDouble(self, title, f"{label} ({u.name})", u.from_mm(mm_value),
+                                       u.from_mm(lo_mm), u.from_mm(hi_mm), u.decimals)
+        if v == round(u.from_mm(mm_value), u.decimals):
+            return mm_value, ok  # untouched: avoid display-rounding drift
+        return u.to_mm(v), ok
+
     # ---- state / refresh
     def set_mode(self, mode):
         self.mode = mode
@@ -190,7 +238,7 @@ class MainWindow(QMainWindow):
         self.features.blockSignals(True)
         self.features.clear()
         for i, f in enumerate(self.doc.features):
-            text = f"{i}: {f.label()}"
+            text = f"{i}: {f.label(self.unit)}"
             if i in self.doc.errors:
                 text += f"   !! {self.doc.errors[i]}"
             item = QListWidgetItem(text)
@@ -213,7 +261,7 @@ class MainWindow(QMainWindow):
             return
         sk = self.sketch
         for i, c in enumerate(sk.constraints):
-            self.constraints.addItem(f"{i}: {c.label()}")
+            self.constraints.addItem(f"{i}: {c.label(self.unit)}")
         self.sketch_status.setText(f"{sk.status}  |  {len(sk.points)} points, {len(sk.lines)} lines, "
                                    f"{len(sk.circles)} circles")
 
@@ -310,7 +358,7 @@ class MainWindow(QMainWindow):
         uv = self.view.sketch_uv(x, y)
         if uv is None:
             return None
-        g = self.snap.value()
+        g = self.snap.value() * self.unit.mm
         return None, ((round(uv[0] / g) * g, round(uv[1] / g) * g) if g > 0 else uv)
 
     def _update_regions(self):
@@ -434,7 +482,8 @@ class MainWindow(QMainWindow):
         elif self.tool == "circle":
             self.view.preview = [np.array(Viewport._circle_world(pl, p0, math.dist(p0, uv)))]
         self.view.update()
-        self.statusBar().showMessage(f"u={uv[0]:.3f}  v={uv[1]:.3f}")
+        u = self.unit
+        self.statusBar().showMessage(f"u={u.from_mm(uv[0]):.{u.decimals}f}  v={u.from_mm(uv[1]):.{u.decimals}f} {u.name}")
 
     # ---- constraints
     def add_constraint(self, kind):
@@ -459,13 +508,13 @@ class MainWindow(QMainWindow):
                 ends = pts if len(pts) == 2 and not lines else list(sk.lines[lines[0]]) if len(lines) == 1 and not pts else None
                 if ends:
                     cur = math.dist(sk.points[ends[0]], sk.points[ends[1]])
-                    value, ok = QInputDialog.getDouble(self, "Distance", "Distance:", round(cur, 4), 1e-6, 1e6, 4)
+                    value, ok = self.ask_length("Distance", "Distance", cur)
                     if not ok:
                         return
                     new = [Constraint(kind, ends, value)]
             elif kind == "diameter" and len(circles) == 1 and not pts and not lines:
                 cur = 2 * sk.circles[circles[0]][1]
-                value, ok = QInputDialog.getDouble(self, "Diameter", "Diameter:", round(cur, 4), 1e-6, 1e6, 4)
+                value, ok = self.ask_length("Diameter", "Diameter", cur)
                 if not ok:
                     return
                 new = [Constraint(kind, circles, value)]
@@ -489,7 +538,7 @@ class MainWindow(QMainWindow):
         c = self.sketch.constraints[i]
         if c.value is None:
             return
-        v, ok = QInputDialog.getDouble(self, "Dimension", "Value:", c.value, 1e-6, 1e6, 4)
+        v, ok = self.ask_length("Dimension", "Value", c.value)
         if ok:
             old, c.value = c.value, v
             if not self._solve_sketch():
@@ -598,10 +647,10 @@ class MainWindow(QMainWindow):
             return
         chosen = sorted(sk.selected_regions())
         profiles = [list(next(p for p in sk.selection if sk.region_at(*p) == r)) for r in chosen] or None
-        dlg = ExtrudeDialog(self, show_mode=self.doc.part is not None)
+        dlg = ExtrudeDialog(self, show_mode=self.doc.part is not None, unit=self.unit)
         dlg.setWindowTitle(f"Extrude {len(profiles)} highlighted region(s)" if profiles else "Extrude all regions")
         if dlg.exec():
-            self.commit(Feature("extrude", sketch_ref=i, value=dlg.dist.value(), cut=dlg.cut, auto=dlg.auto,
+            self.commit(Feature("extrude", sketch_ref=i, value=dlg.distance_mm, cut=dlg.cut, auto=dlg.auto,
                                 profiles=profiles))
 
     def pushpull(self):
@@ -612,7 +661,7 @@ class MainWindow(QMainWindow):
         if info.normal is None:
             QMessageBox.information(self, "Push/Pull", "Only planar faces are supported.")
             return
-        v, ok = QInputDialog.getDouble(self, "Push/Pull", "Distance (positive = outward):", 5.0, -1e5, 1e5, 3)
+        v, ok = self.ask_length("Push/Pull", "Distance, positive = outward", 5.0, -1e5, 1e5)
         if ok and v != 0:
             self.commit(Feature("pushpull", value=v, face=(tuple(map(float, info.center)),
                                                            tuple(map(float, info.normal)))))
@@ -622,7 +671,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, kind.title(), "Select one or more edges first (Ctrl+click for several).")
             return
         mids = [tuple(map(float, self.doc.mesh.edges[i].mid)) for i in sorted(self.view.sel_edges)]
-        v, ok = QInputDialog.getDouble(self, kind.title(), "Size:", 1.0, 1e-4, 1e4, 3)
+        v, ok = self.ask_length(kind.title(), "Size", 1.0, 1e-4, 1e4)
         if ok:
             self.commit(Feature(kind, value=v, edges=mids))
 
@@ -639,12 +688,12 @@ class MainWindow(QMainWindow):
             self.enter_sketch(i)
             return
         if f.kind == "extrude":
-            dlg = ExtrudeDialog(self, f.value, f.auto, f.cut)
+            dlg = ExtrudeDialog(self, f.value, f.auto, f.cut, unit=self.unit)
             if not dlg.exec():
                 return
-            new = (dlg.dist.value(), dlg.cut, dlg.auto)
+            new = (dlg.distance_mm, dlg.cut, dlg.auto)
         else:
-            v, ok = QInputDialog.getDouble(self, f.kind, "Value:", f.value, -1e5, 1e5, 3)
+            v, ok = self.ask_length(f.kind.title(), "Value", f.value, -1e5, 1e5)
             if not ok or v == 0:
                 return
             new = (v, f.cut, f.auto)
@@ -686,7 +735,7 @@ class MainWindow(QMainWindow):
         self.sketch_index = -1
         self.set_mode("model")
         self.mark_dirty(False)
-        self.refresh()
+        self._apply_units()
         self.view.frame_all()
 
     def file_new(self):

@@ -8,6 +8,7 @@ import numpy as np
 from build123d import GeomType, Shape, Solid, Vector, export_step, export_stl
 
 from .sketch import Sketch
+from .units import MM, UNITS, Unit
 
 FORMAT_VERSION = 1
 KINDS = ("sketch", "extrude", "pushpull", "fillet", "chamfer")
@@ -28,17 +29,17 @@ class Feature:
     auto: bool = False  # extrude: cut when the extrusion mostly lies inside the body, otherwise add
     resolved_cut: bool | None = field(default=None, compare=False, repr=False)  # last auto decision
 
-    def label(self) -> str:
+    def label(self, unit: Unit = MM) -> str:
         if self.kind == "sketch":
             return f"{self.name} [{self.sketch.status}]"
         if self.kind == "extrude":
             part = f", {len(self.profiles)} region(s)" if self.profiles is not None else ""
             cut = self.resolved_cut if self.auto and self.resolved_cut is not None else self.cut
             mode = " auto" if self.auto else ""
-            return f"{'Cut' if cut else 'Extrude'}{mode} ({self.value:g}{part}) of #{self.sketch_ref}"
+            return f"{'Cut' if cut else 'Extrude'}{mode} ({unit.fmt(self.value)}{part}) of #{self.sketch_ref}"
         if self.kind == "pushpull":
-            return f"Push/Pull {self.value:+g}"
-        return f"{self.kind.title()} {self.value:g} x{len(self.edges)}"
+            return f"Push/Pull {'+' if self.value >= 0 else '-'}{unit.fmt(abs(self.value))}"
+        return f"{self.kind.title()} {unit.fmt(self.value)} x{len(self.edges)}"
 
     def to_dict(self) -> dict:
         d = {"kind": self.kind, "name": self.name, "sketch_ref": self.sketch_ref, "value": self.value,
@@ -154,6 +155,7 @@ class Document:
     part: Shape | None = None
     mesh: MeshData | None = None
     errors: dict[int, str] = field(default_factory=dict)
+    units: str = "mm"  # display/input units; geometry is always stored in mm
 
     def delete(self, i: int) -> None:
         """Remove a feature; deleting a sketch also removes the extrudes that use it."""
@@ -220,7 +222,8 @@ class Document:
 
     # -- files
     def to_dict(self) -> dict:
-        return {"format": "rcad", "version": FORMAT_VERSION, "features": [f.to_dict() for f in self.features]}
+        return {"format": "rcad", "version": FORMAT_VERSION, "units": self.units,
+                "features": [f.to_dict() for f in self.features]}
 
     def save(self, path: str) -> None:
         with open(path, "w", encoding="utf-8") as fh:
@@ -232,7 +235,9 @@ class Document:
             d = json.load(fh)
         if d.get("format") != "rcad" or d.get("version", 0) > FORMAT_VERSION:
             raise ValueError("not an rCad project (or saved by a newer version)")
-        doc = Document([Feature.from_dict(f) for f in d["features"]])
+        doc = Document([Feature.from_dict(f) for f in d["features"]], units=d.get("units", "mm"))
+        if doc.units not in UNITS:
+            raise ValueError(f"unknown units {doc.units!r}")
         doc.rebuild()
         return doc
 

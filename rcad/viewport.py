@@ -20,6 +20,7 @@ class Viewport(QOpenGLWidget):
         super().__init__()
         self.setMouseTracking(True)
         self.camera = Camera()
+        self.unit_mm = 1.0  # millimetres per display unit; the grid steps in whole display units
         self.mesh: MeshData | None = None
         self.sketch: Sketch | None = None
         self.overlay_sketches: list[Sketch] = []  # sketches on visible layers, drawn faded
@@ -180,7 +181,7 @@ class Viewport(QOpenGLWidget):
         self._draw_sketch()
 
     def _grid_step(self):
-        return 10.0 ** np.floor(np.log10(self.camera.dist / 4))
+        return self.unit_mm * 10.0 ** np.floor(np.log10(self.camera.dist / 4 / self.unit_mm))
 
     def _draw_grid(self):
         GL.glDisable(GL.GL_LIGHTING)
