@@ -99,3 +99,24 @@ def test_sketch_on_face_plane():
     doc.rebuild()
     assert not doc.errors, doc.errors
     assert doc.part.volume == pytest.approx(40 * 30 * 10 - 100 * 4, rel=1e-6)
+
+
+def test_layers_suppress_and_persist(tmp_path):
+    doc = Document([Feature("sketch", "S1", sketch=rect_sketch()), Feature("extrude", sketch_ref=0, value=10)])
+    doc.features.append(Feature("fillet", value=1.0, edges=[(0, 0, 5)]))
+    doc.rebuild()
+    assert not doc.errors
+    filleted = doc.part.volume
+    doc.features[2].visible = False
+    doc.rebuild()
+    assert doc.part.volume == pytest.approx(40 * 30 * 10, rel=1e-6) and filleted < doc.part.volume
+    doc.features[1].visible = False
+    doc.rebuild()
+    assert doc.part is None
+    doc.features[0].visible = False  # hiding a sketch layer must not affect geometry
+    doc.features[1].visible = True
+    doc.rebuild()
+    assert doc.part.volume == pytest.approx(40 * 30 * 10, rel=1e-6)
+    path = str(tmp_path / "l.rcad")
+    doc.save(path)
+    assert [f.visible for f in Document.load(path).features] == [False, True, False]

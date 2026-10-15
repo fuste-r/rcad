@@ -8,7 +8,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut, QSurfaceFormat
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDockWidget, QDoubleSpinBox, QFileDialog,
-    QFormLayout, QInputDialog, QLabel, QListWidget, QMainWindow, QMessageBox, QToolBar, QWidget, QVBoxLayout,
+    QFormLayout, QInputDialog, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QToolBar, QWidget,
+    QVBoxLayout,
 )
 
 from .kernel import Document, Feature
@@ -56,7 +57,8 @@ class MainWindow(QMainWindow):
 
         self.features = QListWidget()
         self.features.itemDoubleClicked.connect(self.edit_feature)
-        dock = QDockWidget("Features", self)
+        self.features.itemChanged.connect(self.toggle_layer)
+        dock = QDockWidget("Layers", self)
         dock.setWidget(self.features)
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
 
@@ -162,14 +164,21 @@ class MainWindow(QMainWindow):
 
     def refresh(self):
         row = self.features.currentRow()
+        self.features.blockSignals(True)
         self.features.clear()
         for i, f in enumerate(self.doc.features):
             text = f"{i}: {f.label()}"
             if i in self.doc.errors:
                 text += f"   !! {self.doc.errors[i]}"
-            self.features.addItem(text)
+            item = QListWidgetItem(text)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if f.visible else Qt.Unchecked)
+            item.setToolTip("Sketch layers show/hide their curves; other layers are suppressed when unchecked")
+            self.features.addItem(item)
+        self.features.blockSignals(False)
         if 0 <= row < self.features.count():
             self.features.setCurrentRow(row)
+        self.view.overlay_sketches = [f.sketch for f in self.doc.features if f.kind == "sketch" and f.visible]
         self.view.set_mesh(self.doc.mesh)
         self.refresh_constraints()
         self.view.update()
@@ -524,6 +533,17 @@ class MainWindow(QMainWindow):
         if i in self.doc.errors:
             QMessageBox.warning(self, "Operation failed", self.doc.errors[i])
             f.value, f.cut = old
+            self.rebuild()
+
+    def toggle_layer(self, item):
+        i = self.features.row(item)
+        f = self.doc.features[i]
+        f.visible = item.checkState() == Qt.Checked
+        if f.kind == "sketch":
+            self.view.overlay_sketches = [g.sketch for g in self.doc.features if g.kind == "sketch" and g.visible]
+            self.mark_dirty()
+            self.view.update()
+        else:
             self.rebuild()
 
     def delete_feature(self):

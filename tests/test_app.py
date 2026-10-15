@@ -114,3 +114,24 @@ def test_full_workflow(qapp, monkeypatch, tmp_path):
     # deleting the sketch removes its extrude
     w.doc.delete(0)
     assert [f.kind for f in w.doc.features][:1] != ["extrude"]
+
+
+def test_layer_checkbox_toggles(qapp, monkeypatch):
+    w = MainWindow()
+    w.view.resize(1000, 700)
+    w.new_sketch()
+    w.set_tool("rect")
+    click(w, (0, 0, 0))
+    click(w, (20, 10, 0))
+    w.finish_sketch()
+    monkeypatch.setattr(appmod.ExtrudeDialog, "exec", lambda self: True)
+    w.extrude()
+    vol = w.doc.part.volume
+    assert w.view.overlay_sketches == [w.doc.features[0].sketch]
+    w.features.item(0).setCheckState(Qt.Unchecked)
+    assert not w.doc.features[0].visible and w.view.overlay_sketches == []
+    assert w.doc.part.volume == pytest.approx(vol)
+    w.features.item(1).setCheckState(Qt.Unchecked)
+    assert w.doc.part is None
+    w.features.item(1).setCheckState(Qt.Checked)
+    assert w.doc.part.volume == pytest.approx(vol)

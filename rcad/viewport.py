@@ -22,6 +22,7 @@ class Viewport(QOpenGLWidget):
         self.camera = Camera()
         self.mesh: MeshData | None = None
         self.sketch: Sketch | None = None
+        self.overlay_sketches: list[Sketch] = []  # sketches on visible layers, drawn faded
         self.sketch_sel: set[tuple[str, int]] = set()
         self.preview: list[np.ndarray] = []  # world-space polylines for rubber-banding
         self.sel_faces: set[int] = set()
@@ -239,37 +240,44 @@ class Viewport(QOpenGLWidget):
         GL.glLineWidth(1)
         GL.glEnable(GL.GL_LIGHTING)
 
+    def _draw_sketch_geometry(self, sk: Sketch, selected: set, base_color):
+        pl = sk.plane
+        world = np.array([pl.to3d(*p) for p in sk.points]).reshape(-1, 3)
+
+        def col(kind, i):
+            GL.glColor3f(*((1.0, 0.35, 0.1) if (kind, i) in selected else base_color))
+
+        GL.glLineWidth(2.5)
+        for i, (a, b) in enumerate(sk.lines):
+            col("l", i)
+            GL.glBegin(GL.GL_LINES)
+            GL.glVertex3f(*world[a])
+            GL.glVertex3f(*world[b])
+            GL.glEnd()
+        for i, (c, r) in enumerate(sk.circles):
+            col("c", i)
+            GL.glBegin(GL.GL_LINE_STRIP)
+            for p in self._circle_world(pl, sk.points[c], r):
+                GL.glVertex3f(*p)
+            GL.glEnd()
+        GL.glPointSize(8)
+        GL.glBegin(GL.GL_POINTS)
+        for i, p in enumerate(world):
+            col("p", i)
+            GL.glVertex3f(*p)
+        GL.glEnd()
+
     def _draw_sketch(self):
         sk = self.sketch
-        if sk is None and not self.preview:
+        if sk is None and not self.preview and not self.overlay_sketches:
             return
         GL.glDisable(GL.GL_LIGHTING)
         GL.glDisable(GL.GL_DEPTH_TEST)
+        for other in self.overlay_sketches:
+            if other is not sk:
+                self._draw_sketch_geometry(other, set(), (0.45, 0.55, 0.75))
         if sk is not None:
-            pl, world = self._sketch_world()
-            GL.glLineWidth(2.5)
-
-            def col(kind, i):
-                GL.glColor3f(*((1.0, 0.35, 0.1) if (kind, i) in self.sketch_sel else (0.05, 0.25, 0.75)))
-
-            for i, (a, b) in enumerate(sk.lines):
-                col("l", i)
-                GL.glBegin(GL.GL_LINES)
-                GL.glVertex3f(*world[a])
-                GL.glVertex3f(*world[b])
-                GL.glEnd()
-            for i, (c, r) in enumerate(sk.circles):
-                col("c", i)
-                GL.glBegin(GL.GL_LINE_STRIP)
-                for p in self._circle_world(pl, sk.points[c], r):
-                    GL.glVertex3f(*p)
-                GL.glEnd()
-            GL.glPointSize(8)
-            GL.glBegin(GL.GL_POINTS)
-            for i, p in enumerate(world):
-                col("p", i)
-                GL.glVertex3f(*p)
-            GL.glEnd()
+            self._draw_sketch_geometry(sk, self.sketch_sel, (0.05, 0.25, 0.75))
         GL.glColor3f(0.4, 0.4, 0.4)
         GL.glLineWidth(1.5)
         for poly in self.preview:

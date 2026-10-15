@@ -23,6 +23,7 @@ class Feature:
     cut: bool = False
     face: tuple | None = None  # pushpull: (center xyz, normal xyz) of the picked planar face
     edges: list = field(default_factory=list)  # fillet/chamfer: midpoints of picked edges
+    visible: bool = True  # layer toggle: sketches show/hide curves, other features are suppressed when off
 
     def label(self) -> str:
         if self.kind == "sketch":
@@ -35,7 +36,7 @@ class Feature:
 
     def to_dict(self) -> dict:
         d = {"kind": self.kind, "name": self.name, "sketch_ref": self.sketch_ref, "value": self.value,
-             "cut": self.cut, "face": self.face, "edges": [list(e) for e in self.edges]}
+             "cut": self.cut, "face": self.face, "edges": [list(e) for e in self.edges], "visible": self.visible}
         if self.sketch:
             d["sketch"] = self.sketch.to_dict()
         return d
@@ -47,7 +48,7 @@ class Feature:
         return Feature(d["kind"], d.get("name", ""), Sketch.from_dict(d["sketch"]) if "sketch" in d else None,
                        d.get("sketch_ref", -1), d.get("value", 0.0), d.get("cut", False),
                        tuple(map(tuple, d["face"])) if d.get("face") else None,
-                       [tuple(e) for e in d.get("edges", [])])
+                       [tuple(e) for e in d.get("edges", [])], d.get("visible", True))
 
 
 @dataclass
@@ -160,7 +161,7 @@ class Document:
         self.mesh = build_mesh(part) if part is not None else None
 
     def _apply(self, part: Shape | None, f: Feature) -> Shape | None:
-        if f.kind == "sketch":
+        if f.kind == "sketch" or not f.visible:
             return part
         if f.kind == "extrude":
             if not 0 <= f.sketch_ref < len(self.features) or self.features[f.sketch_ref].kind != "sketch":
