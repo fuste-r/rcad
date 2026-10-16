@@ -26,7 +26,7 @@ class ExtrudeDialog(QDialog):
     def __init__(self, parent, distance=10.0, auto=True, cut=False, show_mode=True, unit=MM):
         super().__init__(parent)
         self.unit = unit
-        self.setWindowTitle("Extrude")
+        self.setWindowTitle("⇈")
         self.dist = QDoubleSpinBox()
         self.dist.setRange(-1e5, 1e5)
         self.dist.setDecimals(unit.decimals)
@@ -122,10 +122,10 @@ class MainWindow(QMainWindow):
 
     def _build_file_toolbar(self):
         file_tb = self.addToolBar("File")
-        for text, slot, sc in [("New", self.file_new, QKeySequence.New), ("Open", self.file_open, QKeySequence.Open),
-                               ("Save", self.file_save, QKeySequence.Save),
-                               ("Save As", self.file_save_as, QKeySequence.SaveAs),
-                               ("Export STEP/STL", self.file_export, None)]:
+        for text, slot, sc in [("📄", self.file_new, QKeySequence.New), ("📂", self.file_open, QKeySequence.Open),
+                               ("💾", self.file_save, QKeySequence.Save),
+                               ("📋", self.file_save_as, QKeySequence.SaveAs),
+                               ("📤", self.file_export, None)]:
             a = self._act(text, slot, shortcut=sc)
             file_tb.addAction(a)
             self.addAction(a)
@@ -150,13 +150,13 @@ class MainWindow(QMainWindow):
         self.model_tb.addWidget(QLabel(" Sketch on: "))
         self.model_tb.addWidget(self.plane_combo)
         for text, slot, tip in [
-            ("New Sketch", self.new_sketch, "Start a sketch on the chosen plane or the selected planar face"),
-            ("Extrude", self.extrude, "Extrude the selected (or last) sketch"),
-            ("Push/Pull", self.pushpull, "Move the selected planar face along its normal"),
-            ("Fillet", self.fillet, "Round the selected edges"),
-            ("Chamfer", self.chamfer, "Bevel the selected edges"),
-            ("Delete Feature", self.delete_feature, "Delete the highlighted feature"),
-            ("Frame", self.view.frame_all, "Fit the model in view"),
+            ("✏️", self.new_sketch, "Start a sketch on the chosen plane or the selected planar face"),
+            ("⇈", self.extrude, "Extrude the selected (or last) sketch"),
+            ("↕️", self.pushpull, "Move the selected planar face along its normal"),
+            ("◐", self.fillet, "Round the selected edges"),
+            ("◺", self.chamfer, "Bevel the selected edges"),
+            ("🗑", self.delete_feature, "Delete the highlighted feature"),
+            ("⛶", self.view.frame_all, "Fit the model in view"),
         ]:
             self.model_tb.addAction(self._act(text, slot, tip))
 
@@ -165,7 +165,7 @@ class MainWindow(QMainWindow):
         self.addToolBar(Qt.TopToolBarArea, self.sketch_tb)
         group = QActionGroup(self)
         self.tool_actions = {}
-        for name, text in [("select", "Select"), ("line", "Line"), ("rect", "Rectangle"), ("circle", "Circle")]:
+        for name, text in [("select", "⌖"), ("line", "╱"), ("rect", "⬜"), ("circle", "◯")]:
             a = self._act(text, lambda _=False, n=name: self.set_tool(n), checkable=True)
             group.addAction(a)
             a.setChecked(name == "select")
@@ -179,12 +179,12 @@ class MainWindow(QMainWindow):
         self.snap.setToolTip("Grid snap (0 = off)")
         self.sketch_tb.addWidget(self.snap)
         self.sketch_tb.addSeparator()
-        self.sketch_tb.addAction(self._act("Delete selected", self.delete_selection, "Delete selected sketch items"))
-        self.sketch_tb.addAction(self._act("Delete constraint", self.delete_constraint))
+        self.sketch_tb.addAction(self._act("🗑 sel", self.delete_selection, "Delete selected sketch items"))
+        self.sketch_tb.addAction(self._act("🗑 ct", self.delete_constraint))
         self.sketch_tb.addSeparator()
-        self.sketch_tb.addAction(self._act("Extrude", self.extrude_from_sketch,
+        self.sketch_tb.addAction(self._act("⇈", self.extrude_from_sketch,
                                            "Extrude the highlighted regions (Select tool: click a region to highlight it)"))
-        self.sketch_tb.addAction(self._act("Finish Sketch", self.finish_sketch))
+        self.sketch_tb.addAction(self._act("✓ Done", self.finish_sketch))
 
     def _build_constraint_toolbar(self):
         self.addToolBarBreak(Qt.TopToolBarArea)
@@ -651,7 +651,7 @@ class MainWindow(QMainWindow):
     def extrude(self):
         i = self._sketch_for_extrude()
         if i is None:
-            QMessageBox.information(self, "Extrude", "Create a sketch with a closed profile first.")
+            QMessageBox.information(self, "⇈", "Create a sketch with a closed profile first.")
             return
         sk = self.doc.features[i].sketch
         if len(sk.regions()) > 1 and not sk.selected_regions():
@@ -669,7 +669,7 @@ class MainWindow(QMainWindow):
     def _extrude_sketch(self, i: int):
         sk = self.doc.features[i].sketch
         if not sk.regions():
-            QMessageBox.information(self, "Extrude", "The sketch has no closed profile.")
+            QMessageBox.information(self, "⇈", "The sketch has no closed profile.")
             return
         chosen = sorted(sk.selected_regions())
         profiles = [list(next(p for p in sk.selection if sk.region_at(*p) == r)) for r in chosen] or None
@@ -681,13 +681,13 @@ class MainWindow(QMainWindow):
 
     def pushpull(self):
         if len(self.view.sel_faces) != 1:
-            QMessageBox.information(self, "Push/Pull", "Select exactly one planar face.")
+            QMessageBox.information(self, "↕️", "Select exactly one planar face.")
             return
         info = self.doc.mesh.faces[next(iter(self.view.sel_faces))]
         if info.normal is None:
-            QMessageBox.information(self, "Push/Pull", "Only planar faces are supported.")
+            QMessageBox.information(self, "↕️", "Only planar faces are supported.")
             return
-        v, ok = self.ask_length("Push/Pull", "Distance, positive = outward", 5.0, -1e5, 1e5)
+        v, ok = self.ask_length("↕️", "Distance, positive = outward", 5.0, -1e5, 1e5)
         if ok and v != 0:
             self.commit(Feature("pushpull", value=v, face=(tuple(map(float, info.center)),
                                                            tuple(map(float, info.normal)))))
