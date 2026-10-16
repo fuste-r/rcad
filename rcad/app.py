@@ -193,7 +193,7 @@ class MainWindow(QMainWindow):
         self.addToolBar(Qt.TopToolBarArea, self.constraint_tb)
         for text, kind in [("Horizontal", "horizontal"), ("Vertical", "vertical"), ("Coincident", "coincident"),
                            ("Parallel", "parallel"), ("Perpend.", "perpendicular"), ("Equal", "equal"),
-                           ("Distance", "distance"), ("Diameter", "diameter"), ("Fixed", "fixed"),
+                           ("Distance", "distance"), ("Spacing", "spacing"), ("Diameter", "diameter"), ("Fixed", "fixed"),
                            ("Point on line", "point_on_line")]:
             self.constraint_tb.addAction(self._act(text, lambda _=False, k=kind: self.add_constraint(k),
                                                    f"Add a {kind} constraint to the selection"))
@@ -531,6 +531,17 @@ class MainWindow(QMainWindow):
                 new = [Constraint(kind, pts)]
             elif kind in ("parallel", "perpendicular", "equal") and len(lines) == 2 and not pts and not circles:
                 new = [Constraint(kind, lines)]
+            elif kind == "spacing" and len(lines) == 2 and not pts and not circles:
+                a = sk.points[sk.lines[lines[0]][0]]
+                b = sk.points[sk.lines[lines[1]][0]]
+                c = sk.points[sk.lines[lines[1]][1]]
+                ax, ay = a
+                (x1, y1), (x2, y2) = b, c
+                cur = abs((x2 - x1) * (y1 - ay) - (x1 - ax) * (y2 - y1)) / max(math.hypot(x2 - x1, y2 - y1), 1e-12)
+                value, ok = self.ask_length("Spacing", "Spacing between lines", cur)
+                if not ok:
+                    return
+                new = [Constraint("spacing", [sk.lines[lines[0]][0], lines[1]], value)]
             elif kind == "distance":
                 ends = pts if len(pts) == 2 and not lines else list(sk.lines[lines[0]]) if len(lines) == 1 and not pts else None
                 if ends:

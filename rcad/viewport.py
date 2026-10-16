@@ -5,6 +5,7 @@ from OpenGL import GL
 from PySide6.QtCore import QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QPainter
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
+from PySide6.QtWidgets import QLabel
 
 from . import viewcube
 from .camera import Camera, point_segment_dist, ray_plane, ray_triangles
@@ -23,6 +24,7 @@ class Viewport(QOpenGLWidget):
     def __init__(self):
         super().__init__()
         self.setMouseTracking(True)
+        self._dim_labels = []
         self.camera = Camera()
         self.theme: Theme = LIGHT
         self.cube_hover: str | None = None
@@ -483,6 +485,61 @@ class Viewport(QOpenGLWidget):
                 self.clicked.emit(p.x(), p.y(), self._press[1], self._press[2])
         self._press = None
         self._cube_press = False
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        self._sync_dim_labels()
+
+    def _sync_dim_labels(self):
+        if self.sketch is None:
+            for lbl in self._dim_labels:
+                lbl.hide()
+            return
+        pl = self.sketch.plane
+        w, h = self.width(), self.height()
+        positions = []
+        for c in self.sketch.constraints:
+            if c.value is None:
+                continue
+            try:
+                if c.kind == "distance":
+                    a, b = self.sketch.points[c.refs[0]], self.sketch.points[c.refs[1]]
+                    mid = ((a[0]+b[0])/2, (a[1]+b[1])/2)
+                elif c.kind == "spacing":
+                    p = self.sketch.points[c.refs[0]]
+                    a = self.sketch.points[self.sketch.lines[c.refs[1]][0]]
+                    bb = self.sketch.points[self.sketch.lines[c.refs[1]][1]]
+                    ax, ay = a; bx, by = bb
+                    px_, py_ = p
+                    t = ((px_-ax)*(bx-ax)+(py_-ay)*(by-ay))/( (bx-ax)**2+(by-ay)**2 + 1e-12)
+                    t=max(0,min(1,t))
+                    foot=(ax+t*(bx-ax), ay+t*(by-ay))
+                    mid=((p[0]+foot[0])/2,(p[1]+foot[1])/2)
+                elif c.kind == "diameter":
+                    center = self.sketch.points[self.sketch.circles[c.refs[0]][0]]
+                    mid = (center[0]+0.5, center[1])
+                else:
+                    continue
+                pt = np.array(pl.to3d(*mid), dtype=float).reshape(1,3)
+                sx, sy = self.camera.project(pt, w, h)[0][:2]
+                if np.isnan(sx) or np.isnan(sy):
+                    continue
+                positions.append((int(sx), int(sy), f"{c.value:g}"))
+            except Exception:
+                continue
+        while len(self._dim_labels) < len(positions):
+            lbl = QLabel(self)
+            lbl.setStyleSheet("color: #ff3c3c; background: rgba(0,0,0,120); padding: 2px 4px; border-radius: 3px;")
+            self._dim_labels.append(lbl)
+        for idx, (x, y, text) in enumerate(positions):
+            lbl = self._dim_labels[idx]
+            lbl.setText(text)
+            lbl.move(x, y)
+            lbl.adjustSize()
+            lbl.show()
+            lbl.raise_()
+        for idx in range(len(positions), len(self._dim_labels)):
+            self._dim_labels[idx].hide()
 
     def wheelEvent(self, e):
         if e.modifiers() & Qt.ControlModifier:

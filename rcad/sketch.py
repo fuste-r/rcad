@@ -20,6 +20,7 @@ CONSTRAINT_KINDS = {
     "phorizontal": ("pp", False),
     "pvertical": ("pp", False),
     "distance": ("pp", True),
+    "spacing": ("pl", True),
     "parallel": ("ll", False),
     "perpendicular": ("ll", False),
     "equal": ("ll", False),
@@ -156,6 +157,8 @@ class Sketch:
                 h = s.addPointsVertical(pts[r[0]], pts[r[1]], wp, g)
             elif k == "distance":
                 h = s.addPointsDistance(c.value, pts[r[0]], pts[r[1]], wp, g)
+            elif k == "spacing":
+                h = s.addPointLineDistance(c.value, pts[r[0]], lines[r[1]], wp, g)
             elif k == "parallel":
                 h = s.addParallel(lines[r[0]], lines[r[1]], wp, g)
             elif k == "perpendicular":
