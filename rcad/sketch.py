@@ -284,7 +284,7 @@ class Sketch:
 
     # -- persistence
     def to_dict(self) -> dict:
-        return {"plane": asdict(self.plane), "points": self.points, "lines": [list(l) for l in self.lines],
+        return {"plane": asdict(self.plane), "points": [list(p) for p in self.points], "lines": [list(l) for l in self.lines],
                 "circles": [list(c) for c in self.circles],
                 "constraints": [asdict(c) for c in self.constraints], "selection": [list(p) for p in self.selection]}
 

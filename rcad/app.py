@@ -98,6 +98,12 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, self.constraint_dock)
 
         self._build_actions()
+        self._undo: list[dict] = []
+        self._redo: list[dict] = []
+        self._restoring = False
+        self._sketch_undo: list[dict] = []
+        self._sketch_redo: list[dict] = []
+        self._sketch_restoring = False
         QShortcut(QKeySequence(Qt.Key_Escape), self, self.cancel)
         self.resize(1300, 800)
         self.set_mode("model")
@@ -130,6 +136,13 @@ class MainWindow(QMainWindow):
             a = self._act(text, slot, shortcut=sc)
             file_tb.addAction(a)
             self.addAction(a)
+        file_tb.addSeparator()
+        undo_a = self._act("Undo (Ctrl+Z)", self.undo, shortcut=QKeySequence.Undo)
+        redo_a = self._act("Redo (Ctrl+Shift+Z)", self.redo, shortcut=QKeySequence.Redo)
+        file_tb.addAction(undo_a)
+        file_tb.addAction(redo_a)
+        self.addAction(undo_a)
+        self.addAction(redo_a)
         file_tb.addSeparator()
         file_tb.addWidget(QLabel(" Units: "))
         self.unit_combo = QComboBox()
@@ -296,6 +309,87 @@ class MainWindow(QMainWindow):
     def sketch(self) -> Sketch:
         return self.doc.features[self.sketch_index].sketch
 
+    def _push_undo(self):
+        if self._restoring:
+            return
+        self._undo.append(self.doc.to_dict())
+        self._redo.clear()
+
+    def _push_sketch_undo(self):
+        if self._sketch_restoring or self.mode != "sketch":
+            return
+        self._sketch_undo.append(self.sketch.to_dict())
+        self._sketch_redo.clear()
+
+    def _restore_sketch(self, d):
+        sk = self.sketch
+        plane = d["plane"]
+        sk.plane = SketchPlane(tuple(plane["origin"]), tuple(plane["xdir"]), tuple(plane["normal"]))
+        sk.points = [list(p) for p in d["points"]]
+        sk.lines = [tuple(l) for l in d["lines"]]
+        sk.circles = [tuple(c) for c in d["circles"]]
+        sk.constraints = [Constraint(**c) for c in d["constraints"]]
+        sk.selection = [tuple(p) for p in d.get("selection", [])]
+        sk.solve()
+        self.pending = None
+        self.view.preview = []
+        self.view.sketch_sel.clear()
+        self.hover_region = None
+        self._update_regions()
+        self.refresh()
+
+    def undo_sketch(self):
+        if not self._sketch_undo:
+            return False
+        self._sketch_restoring = True
+        self._sketch_redo.append(self.sketch.to_dict())
+        self._restore_sketch(self._sketch_undo.pop())
+        self._sketch_restoring = False
+        return True
+
+    def redo_sketch(self):
+        if not self._sketch_redo:
+            return False
+        self._sketch_restoring = True
+        self._sketch_undo.append(self.sketch.to_dict())
+        self._restore_sketch(self._sketch_redo.pop())
+        self._sketch_restoring = False
+        return True
+
+    def undo(self):
+        if self.mode == "sketch" and self.undo_sketch():
+            return
+        if not self._undo:
+            return
+        self._restoring = True
+        self._redo.append(self.doc.to_dict())
+        d = self._undo.pop()
+        self.doc = Document([Feature.from_dict(f) for f in d["features"]], units=d.get("units", "mm"))
+        self.sketch_index = -1
+        self.set_mode("model")
+        self.doc.rebuild()
+        self.mark_dirty()
+        self._apply_units()
+        self.refresh()
+        self._restoring = False
+
+    def redo(self):
+        if self.mode == "sketch" and self.redo_sketch():
+            return
+        if not self._redo:
+            return
+        self._restoring = True
+        self._undo.append(self.doc.to_dict())
+        d = self._redo.pop()
+        self.doc = Document([Feature.from_dict(f) for f in d["features"]], units=d.get("units", "mm"))
+        self.sketch_index = -1
+        self.set_mode("model")
+        self.doc.rebuild()
+        self.mark_dirty()
+        self._apply_units()
+        self.refresh()
+        self._restoring = False
+
     def rebuild(self):
         self.doc.rebuild()
         self.mark_dirty()
@@ -306,6 +400,7 @@ class MainWindow(QMainWindow):
 
     def commit(self, feature: Feature) -> bool:
         """Append a feature; drop it again if the kernel rejects it."""
+        self._push_undo()
         had_errors = set(self.doc.errors)
         self.doc.features.append(feature)
         self.rebuild()
@@ -336,11 +431,13 @@ class MainWindow(QMainWindow):
             plane = SketchPlane(tuple(map(float, info.center)), tuple(map(float, x)), tuple(map(float, n)))
         else:
             plane = standard_plane(choice)
+        self._push_undo()
         n_sketch = sum(1 for f in self.doc.features if f.kind == "sketch") + 1
         self.doc.features.append(Feature("sketch", f"Sketch {n_sketch}", sketch=Sketch(plane)))
         self.enter_sketch(len(self.doc.features) - 1)
 
     def enter_sketch(self, index):
+        self._push_undo()
         self.sketch_index = index
         self.set_mode("sketch")
         pl = self.sketch.plane
@@ -434,6 +531,7 @@ class MainWindow(QMainWindow):
         return ok
 
     def _sketch_click(self, x, y, mods):
+        self._push_sketch_undo()
         sk = self.sketch
         if self.tool == "select":
             hit = self.view.pick_sketch(x, y)
@@ -514,6 +612,7 @@ class MainWindow(QMainWindow):
 
     # ---- constraints
     def add_constraint(self, kind):
+        self._push_sketch_undo()
         sk = self.sketch
         sel = sorted(self.view.sketch_sel)
         pts = [i for k, i in sel if k == "p"]
@@ -576,6 +675,7 @@ class MainWindow(QMainWindow):
         c = self.sketch.constraints[i]
         if c.value is None:
             return
+        self._push_sketch_undo()
         v, ok = self.ask_length("Dimension", "Value", c.value)
         if ok:
             old, c.value = c.value, v
@@ -587,10 +687,12 @@ class MainWindow(QMainWindow):
     def delete_constraint(self):
         i = self.constraints.currentRow()
         if i >= 0:
+            self._push_sketch_undo()
             self.sketch.remove_constraint(i)
             self._solve_sketch()
 
     def delete_selection(self):
+        self._push_sketch_undo()
         sk = self.sketch
         for kind in ("l", "c", "p"):  # deleting points last keeps the other indices stable
             for idx in sorted((i for k, i in self.view.sketch_sel if k == kind), reverse=True):
@@ -641,6 +743,7 @@ class MainWindow(QMainWindow):
                 feat_i = candidates[-1] if candidates else None
         if feat_i is None:
             return
+        self._push_undo()
         f = self.doc.features[feat_i]
         step = 0.5 if not (mods & Qt.ShiftModifier) else 0.1
         f.value = max(1e-4, f.value + (delta / 120.0) * step)
