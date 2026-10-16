@@ -77,6 +77,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.view)
         self.view.clicked.connect(self.on_click)
         self.view.hovered.connect(self.on_hover)
+        self.view.scrolled.connect(self.on_wheel_adjust)
 
         self.features = QListWidget()
         self.features.itemDoubleClicked.connect(self.edit_feature)
@@ -614,6 +615,38 @@ class MainWindow(QMainWindow):
         elif face is not None:
             v.sel_faces.symmetric_difference_update({face})
         self._update_regions()
+
+    def on_wheel_adjust(self, x, y, delta, mods):
+        edge = self.view.hover_edge
+        if edge is None and self.view.sel_edges:
+            edge = sorted(self.view.sel_edges)[0]
+        feat_i = self._feature_for_edge(edge)
+        if feat_i is None:
+            row = self.features.currentRow()
+            if 0 <= row < len(self.doc.features) and self.doc.features[row].kind in ("fillet", "chamfer"):
+                feat_i = row
+            else:
+                candidates = [i for i, f in enumerate(self.doc.features) if f.kind in ("fillet", "chamfer")]
+                feat_i = candidates[-1] if candidates else None
+        if feat_i is None:
+            return
+        f = self.doc.features[feat_i]
+        step = 0.5 if not (mods & Qt.ShiftModifier) else 0.1
+        f.value = max(1e-4, f.value + (delta / 120.0) * step)
+        self.rebuild()
+        self.statusBar().showMessage(f"{f.kind.title()} {self.unit.fmt(f.value)}", 2000)
+
+    def _feature_for_edge(self, edge):
+        if edge is None or self.doc.mesh is None or not (0 <= edge < len(self.doc.mesh.edges)):
+            return None
+        mid = np.asarray(self.doc.mesh.edges[edge].mid, float)
+        for i, f in enumerate(self.doc.features):
+            if f.kind not in ("fillet", "chamfer"):
+                continue
+            for m in f.edges:
+                if np.linalg.norm(np.asarray(m, float) - mid) < 1e-3:
+                    return i
+        return None
 
     def on_hover(self, x, y):
         if self.mode == "sketch":

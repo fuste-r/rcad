@@ -18,6 +18,7 @@ DRAG_PX = 4
 class Viewport(QOpenGLWidget):
     clicked = Signal(float, float, object, object)  # x, y, Qt.MouseButton, Qt.KeyboardModifier
     hovered = Signal(float, float)
+    scrolled = Signal(float, float, int, object)  # x, y, angle delta, Qt.KeyboardModifier
 
     def __init__(self):
         super().__init__()
@@ -484,5 +485,10 @@ class Viewport(QOpenGLWidget):
         self._cube_press = False
 
     def wheelEvent(self, e):
+        if e.modifiers() & Qt.ControlModifier:
+            self.scrolled.emit(e.position().x(), e.position().y(), e.angleDelta().y(), e.modifiers())
+            e.accept()
+            self.update()
+            return
         self.camera.zoom(e.angleDelta().y() / 120)
         self.update()
