@@ -115,6 +115,12 @@ class MainWindow(QMainWindow):
         return a
 
     def _build_actions(self):
+        self._build_file_toolbar()
+        self._build_model_toolbar()
+        self._build_sketch_toolbar()
+        self._build_constraint_toolbar()
+
+    def _build_file_toolbar(self):
         file_tb = self.addToolBar("File")
         for text, slot, sc in [("New", self.file_new, QKeySequence.New), ("Open", self.file_open, QKeySequence.Open),
                                ("Save", self.file_save, QKeySequence.Save),
@@ -136,6 +142,7 @@ class MainWindow(QMainWindow):
         self.theme_combo.currentTextChanged.connect(lambda t: self.set_theme(t.lower()))
         file_tb.addWidget(self.theme_combo)
 
+    def _build_model_toolbar(self):
         self.model_tb = QToolBar("Model")
         self.addToolBar(self.model_tb)
         self.plane_combo = QComboBox()
@@ -153,6 +160,7 @@ class MainWindow(QMainWindow):
         ]:
             self.model_tb.addAction(self._act(text, slot, tip))
 
+    def _build_sketch_toolbar(self):
         self.sketch_tb = QToolBar("Sketch")
         self.addToolBar(Qt.TopToolBarArea, self.sketch_tb)
         group = QActionGroup(self)
@@ -178,6 +186,7 @@ class MainWindow(QMainWindow):
                                            "Extrude the highlighted regions (Select tool: click a region to highlight it)"))
         self.sketch_tb.addAction(self._act("Finish Sketch", self.finish_sketch))
 
+    def _build_constraint_toolbar(self):
         self.addToolBarBreak(Qt.TopToolBarArea)
         self.constraint_tb = QToolBar("Constraints")
         self.addToolBar(Qt.TopToolBarArea, self.constraint_tb)
