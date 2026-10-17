@@ -8,7 +8,9 @@ from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut, QSurfaceFormat
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDockWidget, QDoubleSpinBox, QFileDialog,
-    QFormLayout, QInputDialog, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QToolBar, QWidget,
+    QFormLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
+    QPushButton, QTextEdit,
+    QToolBar, QWidget,
     QVBoxLayout,
 )
 
@@ -58,6 +60,78 @@ class ExtrudeDialog(QDialog):
     @property
     def cut(self) -> bool:
         return self.mode.currentIndex() == 2
+
+
+class ExpressionDialog(QDialog):
+    def __init__(self, parent, text: str = ""):
+        super().__init__(parent)
+        self.setWindowTitle("Expression")
+        self.text = QTextEdit()
+        self.text.setPlainText(text)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.text)
+        box = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Ok)
+        box.accepted.connect(self.accept)
+        box.rejected.connect(self.reject)
+        layout.addWidget(box)
+
+    def expression(self) -> str:
+        return self.text.toPlainText().strip()
+
+
+class VariablesDialog(QDialog):
+    def __init__(self, parent, variables: dict[str, float] | None = None):
+        super().__init__(parent)
+        self.variables = dict(variables or {})
+        self.setWindowTitle("Expressions and Variables")
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.name_edit = QLineEdit()
+        self.value_edit = QLineEdit()
+        add_btn = QPushButton("Add")
+        remove_btn = QPushButton("Remove")
+        form.addRow("Variable", self.name_edit)
+        form.addRow("Value", self.value_edit)
+        form.addRow(add_btn, remove_btn)
+        layout.addLayout(form)
+        self.list = QListWidget()
+        layout.addWidget(self.list)
+        add_btn.clicked.connect(self._add)
+        remove_btn.clicked.connect(self._remove)
+        self.refresh()
+        self.name_edit.setFocus()
+
+    def refresh(self):
+        self.list.clear()
+        for name in self.variables:
+            self.list.addItem(name)
+        self.name_edit.clear()
+        self.value_edit.clear()
+
+    def _add(self):
+        name = self.name_edit.text().strip()
+        value = self.value_edit.text().strip()
+        if not name or not value:
+            return
+        try:
+            self.variables[name] = float(value)
+        except ValueError:
+            return
+        self.list.addItem(name)
+        self.name_edit.clear()
+        self.value_edit.clear()
+
+    def _remove(self):
+        item = self.list.currentItem()
+        if item is None:
+            return
+        name = item.text()
+        del self.variables[name]
+        self.list.takeItem(self.list.row(item))
+        self.refresh()
+
+    def variables(self) -> dict[str, float]:
+        return dict(self.variables)
 
 
 class MainWindow(QMainWindow):
@@ -137,14 +211,17 @@ class MainWindow(QMainWindow):
             file_tb.addAction(a)
             self.addAction(a)
         file_tb.addSeparator()
+        self.variables_tb = QToolBar("Variables")
+        self.variables_tb.addSeparator()
+        v_btn = self._act("Variables", self._edit_variables, "Edit parametric variables and expressions", shortcut="Ctrl+Shift+V")
+        self.variables_tb.addAction(v_btn)
+        self.variables_tb.addSeparator()
+        file_tb.addWidget(QLabel(" Units: "))
         undo_a = self._act("Undo (Ctrl+Z)", self.undo, shortcut=QKeySequence.Undo)
         redo_a = self._act("Redo (Ctrl+Shift+Z)", self.redo, shortcut=QKeySequence.Redo)
         file_tb.addAction(undo_a)
         file_tb.addAction(redo_a)
-        self.addAction(undo_a)
-        self.addAction(redo_a)
         file_tb.addSeparator()
-        file_tb.addWidget(QLabel(" Units: "))
         self.unit_combo = QComboBox()
         self.unit_combo.addItems(list(UNITS))
         self.unit_combo.setToolTip("Display and input units (geometry is stored in mm)")
@@ -206,7 +283,7 @@ class MainWindow(QMainWindow):
         self.addToolBar(Qt.TopToolBarArea, self.constraint_tb)
         for text, kind in [("Horizontal", "horizontal"), ("Vertical", "vertical"), ("Coincident", "coincident"),
                            ("Parallel", "parallel"), ("Perpend.", "perpendicular"), ("Equal", "equal"),
-                           ("Distance", "distance"), ("Spacing", "spacing"), ("Diameter", "diameter"), ("Fixed", "fixed"),
+                           ("Distance", "distance"), ("Expression", "expression"), ("Spacing", "spacing"), ("Diameter", "diameter"), ("Fixed", "fixed"),
                            ("Point on line", "point_on_line")]:
             self.constraint_tb.addAction(self._act(text, lambda _=False, k=kind: self.add_constraint(k),
                                                    f"Add a {kind} constraint to the selection"))
@@ -250,6 +327,14 @@ class MainWindow(QMainWindow):
         if v == round(u.from_mm(mm_value), u.decimals):
             return mm_value, ok  # untouched: avoid display-rounding drift
         return u.to_mm(v), ok
+
+    # ---- variables / expressions
+    def _edit_variables(self):
+        self._push_undo()
+        dialog = VariablesDialog(self, self.doc.variables)
+        if dialog.exec():
+            self.doc.variables = dialog.variables()
+            self.refresh()
 
     # ---- state / refresh
     def set_mode(self, mode):
@@ -641,6 +726,15 @@ class MainWindow(QMainWindow):
                 if not ok:
                     return
                 new = [Constraint("spacing", [sk.lines[lines[0]][0], lines[1]], value)]
+            elif kind == "expression" and len(pts) == 2 and not lines and not circles:
+                dialog = ExpressionDialog(self, "(e.g. 2*a + 3)π")
+                if dialog.exec():
+                    expr = dialog.expression()
+                    if expr:
+                        new = [Constraint("expression", [pts[0], pts[1]], expression=expr)]
+                        self.statusBar().showMessage(f"Expression: {expr}", 6000)
+                        return new
+                return []
             elif kind == "distance":
                 ends = pts if len(pts) == 2 and not lines else list(sk.lines[lines[0]]) if len(lines) == 1 and not pts else None
                 if ends:
@@ -673,6 +767,19 @@ class MainWindow(QMainWindow):
     def edit_constraint(self, item):
         i = self.constraints.row(item)
         c = self.sketch.constraints[i]
+        if c.expression is not None:
+            dialog = ExpressionDialog(self, c.expression)
+            if dialog.exec():
+                expr = dialog.expression()
+                if expr:
+                    self._push_sketch_undo()
+                    old = c.expression
+                    c.expression = expr
+                    if not self._solve_sketch():
+                        c.expression = old
+                        self.sketch.solve()
+                        self.refresh_constraints()
+            return
         if c.value is None:
             return
         self._push_sketch_undo()

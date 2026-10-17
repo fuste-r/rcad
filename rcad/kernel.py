@@ -156,6 +156,7 @@ class Document:
     mesh: MeshData | None = None
     errors: dict[int, str] = field(default_factory=dict)
     units: str = "mm"  # display/input units; geometry is always stored in mm
+    variables: dict[str, float] = field(default_factory=dict)  # expression variables
 
     def delete(self, i: int) -> None:
         """Remove a feature; deleting a sketch also removes the extrudes that use it."""
@@ -186,7 +187,9 @@ class Document:
         if f.kind == "extrude":
             if not 0 <= f.sketch_ref < len(self.features) or self.features[f.sketch_ref].kind != "sketch":
                 raise ValueError("extrude has no valid sketch")
-            solid = self.features[f.sketch_ref].sketch.solid(f.value, f.profiles)
+            sketch = self.features[f.sketch_ref].sketch
+            sketch.variables = self.variables
+            solid = sketch.solid(f.value, f.profiles)
             if solid is None:
                 raise ValueError("sketch has no matching closed region or distance is zero")
             cut = f.cut
@@ -223,7 +226,8 @@ class Document:
     # -- files
     def to_dict(self) -> dict:
         return {"format": "rcad", "version": FORMAT_VERSION, "units": self.units,
-                "features": [f.to_dict() for f in self.features]}
+                "features": [f.to_dict() for f in self.features],
+                "variables": self.variables}
 
     def save(self, path: str) -> None:
         with open(path, "w", encoding="utf-8") as fh:
@@ -238,6 +242,12 @@ class Document:
         doc = Document([Feature.from_dict(f) for f in d["features"]], units=d.get("units", "mm"))
         if doc.units not in UNITS:
             raise ValueError(f"unknown units {doc.units!r}")
+        doc.variables = d.get("variables", {})
+        if not isinstance(doc.variables, dict):
+            doc.variables = {}
+        for f in doc.features:
+            if f.kind == "sketch" and f.sketch is not None:
+                f.sketch.variables = doc.variables
         doc.rebuild()
         return doc
 

@@ -9,6 +9,7 @@ from build123d import Face, Plane, Shape, Solid, Vector, Wire
 from py_slvs import slvs
 
 from .units import MM, Unit
+from .expression_eval import _evaluate_expression
 
 BASE_GROUP, SKETCH_GROUP = 1, 2
 
@@ -27,6 +28,7 @@ CONSTRAINT_KINDS = {
     "diameter": ("c", True),
     "fixed": ("p", False),
     "point_on_line": ("pl", False),
+    "expression": ("pp", True),
 }
 
 
@@ -67,6 +69,7 @@ class Constraint:
     kind: str
     refs: list[int]
     value: float | None = None
+    expression: str | None = None  # expression using variables, when not None
 
     def label(self, unit: Unit = MM) -> str:
         v = f" = {unit.fmt(self.value)}" if self.value is not None else ""
@@ -81,6 +84,7 @@ class Sketch:
     circles: list[tuple[int, float]] = field(default_factory=list)  # (center point, radius)
     constraints: list[Constraint] = field(default_factory=list)
     selection: list[tuple[float, float]] = field(default_factory=list)  # points inside the highlighted regions
+    variables: dict[str, float] = field(default_factory=dict)  # expression variables
     status: str = "unsolved"
     dof: int = -1
 
@@ -169,6 +173,11 @@ class Sketch:
                 h = s.addDiameter(c.value, circles[r[0]], g)
             elif k == "fixed":
                 h = s.addWhereDragged(pts[r[0]], wp, g)
+            elif k == "expression":
+                if c.expression is None:
+                    raise ValueError("expression constraint has no expression")
+                val = _evaluate_expression(c.expression, self.variables)
+                h = s.addPointsDistance(val, pts[r[0]], pts[r[1]], wp, g)
             elif k == "point_on_line":
                 h = s.addPointOnLine(pts[r[0]], lines[r[1]], wp, g)
             else:
