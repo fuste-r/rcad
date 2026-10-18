@@ -135,3 +135,32 @@ def test_layer_checkbox_toggles(qapp, monkeypatch):
     assert w.doc.part is None
     w.features.item(1).setCheckState(Qt.Checked)
     assert w.doc.part.volume == pytest.approx(vol)
+
+
+def test_symmetry_preserves_shared_vertices(qapp):
+    w = MainWindow()
+    w.new_sketch()
+    sk = w.sketch
+    axis_a = sk.add_point(3, -2)
+    axis_b = sk.add_point(3, 3)
+    p0 = sk.add_point(0, 1)
+    p1 = sk.add_point(1, 1)
+    p2 = sk.add_point(1, 2)
+    axis = sk.add_line(axis_a, axis_b)
+    first = sk.add_line(p0, p1)
+    second = sk.add_line(p1, p2)
+
+    w.view.sketch_sel = {("l", axis)}
+    w.add_constraint("symmetry")
+    w.view.sketch_sel = {("l", first), ("l", second)}
+    w.add_constraint("symmetry")
+
+    mirrored_first = sk.lines[-2]
+    mirrored_second = sk.lines[-1]
+    assert set(mirrored_first) & set(mirrored_second)
+    mirrored_points = {point for line in (mirrored_first, mirrored_second) for point in line}
+    assert sorted((sk.points[p][0], sk.points[p][1]) for p in mirrored_points) == [
+        pytest.approx((5, 1)),
+        pytest.approx((5, 2)),
+        pytest.approx((6, 1)),
+    ]

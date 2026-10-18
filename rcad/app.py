@@ -16,7 +16,14 @@ from PySide6.QtWidgets import (
 
 from .kernel import Document, Feature
 from .camera import ray_plane
-from .sketch import CONSTRAINT_KINDS, Constraint, Sketch, SketchPlane, standard_plane
+from .sketch import (
+    CONSTRAINT_KINDS,
+    Constraint,
+    Sketch,
+    SketchPlane,
+    standard_plane,
+    reflect_point_across_line,
+)
 from .units import MM, UNITS
 from .theme import CHOICES, apply_choice
 from .viewport import Viewport
@@ -175,6 +182,8 @@ class MainWindow(QMainWindow):
         self._undo: list[dict] = []
         self._redo: list[dict] = []
         self._restoring = False
+        self._mirror_axis = None   # (a_idx, b_idx, line_idx) for symmetry tool
+        self._mirroring = False
         self._sketch_undo: list[dict] = []
         self._sketch_redo: list[dict] = []
         self._sketch_restoring = False
@@ -281,12 +290,16 @@ class MainWindow(QMainWindow):
         self.addToolBarBreak(Qt.TopToolBarArea)
         self.constraint_tb = QToolBar("Constraints")
         self.addToolBar(Qt.TopToolBarArea, self.constraint_tb)
-        for text, kind in [("Horizontal", "horizontal"), ("Vertical", "vertical"), ("Coincident", "coincident"),
-                           ("Parallel", "parallel"), ("Perpend.", "perpendicular"), ("Equal", "equal"),
-                           ("Distance", "distance"), ("Expression", "expression"), ("Spacing", "spacing"), ("Diameter", "diameter"), ("Fixed", "fixed"),
-                           ("Point on line", "point_on_line")]:
-            self.constraint_tb.addAction(self._act(text, lambda _=False, k=kind: self.add_constraint(k),
-                                                   f"Add a {kind} constraint to the selection"))
+        tips = {
+            "Symmetry": "Two-step: 1) click mirror line, 2) click points/lines to mirror, press Symmetry again."
+        }
+        for text, kind in [
+            ("Horizontal", "horizontal"), ("Vertical", "vertical"), ("Coincident", "coincident"),
+            ("Parallel", "parallel"), ("Perpend.", "perpendicular"), ("Equal", "equal"),
+            ("Distance", "distance"), ("Expression", "expression"), ("Symmetry", "symmetry"), ("Spacing", "spacing"), ("Diameter", "diameter"), ("Fixed", "fixed"),
+            ("Point on line", "point_on_line")]:
+            tip = tips.get(text, f"Add a {kind} constraint to the selection")
+            self.constraint_tb.addAction(self._act(text, lambda _=False, k=kind: self.add_constraint(k), tip))
 
     # ---- units
     @property
@@ -557,6 +570,8 @@ class MainWindow(QMainWindow):
         for f in self.doc.features:
             if f.kind == "sketch" and (self.mode == "model" or f is self.doc.features[self.sketch_index]):
                 f.sketch.selection = []
+        self._mirror_axis = None
+        self._mirroring = False
         self._update_regions()
 
     def _snap(self, x, y):
@@ -622,6 +637,14 @@ class MainWindow(QMainWindow):
             hit = self.view.pick_sketch(x, y)
             sel = self.view.sketch_sel
             multi = bool(mods & Qt.ControlModifier)
+            # In mirror mode (self._mirror_axis is set) we always add hits to the selection,
+            # without requiring Ctrl and without replacing the current selection.
+            if self._mirror_axis is not None:
+                if hit is not None:
+                    sel.add(hit)
+                # background clicks are ignored in mirror mode
+                self._update_regions()
+                return
             if hit is None:
                 uv = self.view.sketch_uv(x, y)
                 if not multi:
@@ -753,6 +776,93 @@ class MainWindow(QMainWindow):
                 new = [Constraint(kind, [p]) for p in pts]
             elif kind == "point_on_line" and len(pts) == 1 and len(lines) == 1 and not circles:
                 new = [Constraint(kind, [pts[0], lines[0]])]
+            elif kind == "symmetry":
+                # Two-step mirror: set mirror line
+                if self._mirror_axis is None:
+                    # Expect exactly one line in selection
+                    lines = [i for k, i in sel if k == "l"]
+                    if len(lines) == 1 and not pts and not circles:
+                        line_idx = lines[0]
+                        line_pts = sk.lines[line_idx]
+                        a_idx, b_idx = line_pts
+                        a = sk.points[a_idx]
+                        b = sk.points[b_idx]
+                        self._mirror_axis = (a_idx, b_idx, line_idx)
+                        self._mirroring = True
+                        self.statusBar().showMessage(
+                            "Select points/lines to mirror across this line, then press Symmetry again.",
+                            6000,
+                        )
+                        # Keep the selection (so the user can add more items)
+                        return
+                    else:
+                        self.statusBar().showMessage(
+                            "To set a mirror axis, select exactly one line first.", 6000
+                        )
+                        return
+                else:
+                    # We have a mirror axis; mirror the selected items
+                    if not pts and not lines:
+                        self.statusBar().showMessage(
+                            "Select points or lines to mirror (or press Escape to cancel).", 6000
+                        )
+                        return
+                    self._push_sketch_undo()
+                    sk = self.sketch
+                    a_idx, b_idx, mirror_line_idx = self._mirror_axis
+                    # Exclude the mirror line and its endpoints from the items to mirror
+                    lines = [i for i in lines if i != mirror_line_idx]
+                    pts = [i for i in pts if i not in (a_idx, b_idx)]
+                    a = sk.points[a_idx]
+                    b = sk.points[b_idx]
+                    new_constraints = []
+                    # Fix the mirror line endpoints so the axis stays in place
+                    new_constraints.append(Constraint("fixed", [a_idx]))
+                    new_constraints.append(Constraint("fixed", [b_idx]))
+                    # Keep original geometry (points) fixed so the original line stays put
+                    points_to_fix = set(pts)
+                    for l_idx in lines:
+                        (p1, p2) = sk.lines[l_idx]
+                        points_to_fix.add(p1)
+                        points_to_fix.add(p2)
+                    for p in points_to_fix:
+                        new_constraints.append(Constraint("fixed", [p]))
+
+                    mirrored_points = {}
+
+                    def mirrored_point(point_idx):
+                        if point_idx not in mirrored_points:
+                            reflected = reflect_point_across_line(sk.points[point_idx], a, b)
+                            mirrored_points[point_idx] = sk.add_point(reflected[0], reflected[1])
+                            new_constraints.append(
+                                Constraint("symmetry", [point_idx, mirrored_points[point_idx], mirror_line_idx])
+                            )
+                        return mirrored_points[point_idx]
+
+                    for p in pts:
+                        mirrored_point(p)
+
+                    for l_idx in lines:
+                        (p1, p2) = sk.lines[l_idx]
+                        new_p1_idx = mirrored_point(p1)
+                        new_p2_idx = mirrored_point(p2)
+                        mirror_line_idx_new = sk.add_line(new_p1_idx, new_p2_idx)
+                    if new_constraints:
+                        sk.constraints += new_constraints
+                        self._mirror_axis = None
+                        self._mirroring = False
+                        self.view.sketch_sel.clear()
+                        self._solve_sketch()
+                        self.statusBar().showMessage(
+                            f"Mirrored {len(pts) + len(lines)} item(s).", 6000
+                        )
+                    else:
+                        self.statusBar().showMessage(
+                            "No items selected to mirror.", 6000
+                        )
+                    return
+                # Fallback to old behavior (two points + one line)
+                new = [Constraint("symmetry", [pts[0], pts[1], lines[0]])]
         except IndexError:
             new = []
         if not new:

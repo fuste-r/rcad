@@ -29,7 +29,32 @@ CONSTRAINT_KINDS = {
     "fixed": ("p", False),
     "point_on_line": ("pl", False),
     "expression": ("pp", True),
+    "symmetry": ("ppl", False),
 }
+
+def reflect_point_across_line(p, a, b):
+    """Reflect point p across the line from a to b (2D coordinates).
+
+    p, a, b are (x, y) tuples/sequences.
+    """
+    ax, ay = a
+    bx, by = b
+    px, py = p
+    dx = bx - ax
+    dy = by - ay
+    den = dx * dx + dy * dy
+    if den == 0:
+        return list(p)
+    t = ((px - ax) * dx + (py - ay) * dy) / den
+    foot_x = ax + t * dx
+    foot_y = ay + t * dy
+    return [2 * foot_x - px, 2 * foot_y - py]
+
+
+def _mirror_points_across_line(points, a, b):
+    """Return reflected coordinates for a list of points across line a-b."""
+    return [reflect_point_across_line(p, a, b) for p in points]
+
 
 
 @dataclass
@@ -178,11 +203,29 @@ class Sketch:
                     raise ValueError("expression constraint has no expression")
                 val = _evaluate_expression(c.expression, self.variables)
                 h = s.addPointsDistance(val, pts[r[0]], pts[r[1]], wp, g)
+            elif k == "symmetry":
+                p1, p2, axis = r
+                p1_xy, p2_xy = self.points[p1], self.points[p2]
+                axis_a, axis_b = self.lines[r[2]]
+                if math.dist(p1_xy, reflect_point_across_line(p1_xy, self.points[axis_a], self.points[axis_b])) < 1e-9:
+                    h = (
+                        s.addPointsCoincident(pts[p1], pts[p2], wp, g),
+                        s.addPointOnLine(pts[p1], lines[axis], wp, g),
+                    )
+                else:
+                    pair_line = s.addLineSegment(pts[p1], pts[p2], g)
+                    midpoint = s.addPoint2dV(wp, (p1_xy[0] + p2_xy[0]) / 2, (p1_xy[1] + p2_xy[1]) / 2, g)
+                    h = (
+                        s.addMidPoint(midpoint, pair_line, wp, g),
+                        s.addPointOnLine(midpoint, lines[axis], wp, g),
+                        s.addPerpendicular(pair_line, lines[axis], wp, g),
+                    )
             elif k == "point_on_line":
                 h = s.addPointOnLine(pts[r[0]], lines[r[1]], wp, g)
             else:
                 raise ValueError(f"unknown constraint {k}")
-            handle_to_constraint[h] = ci
+            for handle in h if isinstance(h, tuple) else (h,):
+                handle_to_constraint[handle] = ci
 
         res = s.solve(g, True)
         self.dof = s.Dof
