@@ -561,13 +561,9 @@ class Viewport(QOpenGLWidget):
         if not self._dragged:
             return
         alt = bool(mods & Qt.AltModifier)
-        if btn == Qt.RightButton or (btn == Qt.LeftButton and (self.left_orbits or alt or self._cube_press)
-                                     and not mods & Qt.ShiftModifier):
-            self.camera.orbit(-d.x() * 0.4, -d.y() * 0.4)
-        elif btn == Qt.MiddleButton or (btn == Qt.LeftButton and mods & Qt.ShiftModifier):
-            self.camera.pan(d.x(), d.y(), self.height())
-        elif self._extrude_state is not None:
-            # Drag-to-extrude: project cursor onto the face plane, measure along normal
+        # Drag-to-extrude takes priority: if a face is being dragged, ignore orbit/pan
+        if self._extrude_state is not None:
+            # Project cursor onto the face plane, measure along normal
             w, h = self.width(), self.height()
             o, rd = self.camera.ray(p.x(), p.y(), w, h)
             c, n = self._extrude_state["center"], self._extrude_state["normal"]
@@ -575,6 +571,11 @@ class Viewport(QOpenGLWidget):
             if proj is not None:
                 self._extrude_dist = float(np.dot(proj - c, n))
             self._update_extrude_preview()
+        elif btn == Qt.RightButton or (btn == Qt.LeftButton and (self.left_orbits or alt or self._cube_press)
+                                     and not mods & Qt.ShiftModifier):
+            self.camera.orbit(-d.x() * 0.4, -d.y() * 0.4)
+        elif btn == Qt.MiddleButton or (btn == Qt.LeftButton and mods & Qt.ShiftModifier):
+            self.camera.pan(d.x(), d.y(), self.height())
         self.update()
 
     def mouseReleaseEvent(self, e):
