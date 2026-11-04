@@ -29,3 +29,48 @@ Shapr3D's feel comes from selecting something and then dragging it directly, so 
 4. Smart snapping and auto-constraints: midpoints, centers, tangents, alignment
 5. Editable on-canvas dimensions: click a value to change it
 6. Context-aware tools: selection decides which actions are offered (1/3)
+7. Drag handles for fillet and chamfer: replaces Ctrl+wheel prototype
+
+### Tier 2: Essential modeling tools
+8. Sketch curves: arcs first, then ellipses, splines, polygons
+9. Sketch editing: trim, split, offset, fillet, construction geometry, working mirror
+10. Project model edges into a sketch, tangent/concentric/angle constraints
+11. Revolve, then sweep and loft
+12. Shell, offset face, thicken
+13. Booleans: union, subtract, intersect
+14. Multi-body support (currently one `part` shape)
+15. Transforms: move, rotate, scale, mirror, patterns, split body
+16. Construction planes and axes
+17. Direct face edits: move, rotate, delete a face
+
+### Tier 3: Workflow and inspection
+18. Real parametric history: rollback, reordering, renaming
+19. Items panel: bodies, sketches, planes with folders and visibility
+20. Measure tool: distance, angle, area, volume, bounding box
+21. Section view with draggable plane
+22. Display options: smooth shading, visual styles, hidden edges
+23. Selection quality: box select, select tangent chains/loops
+24. More file formats: import STEP, IGES, BREP, STL, DXF, SVG
+25. Safer files: autosave, crash recovery, atomic saves
+
+### Tier 4: Larger, later projects
+26. 2D drawings with generated views
+27. Assemblies with components and joints
+28. Rendering with materials and lighting
+29. Text in sketches, reference images
+30. Pen and touch input
+
+### Foundation work (needed before Tier 1-2):
+- Incremental rebuilds (every edit replays full history on UI thread)
+- Stable face and edge references (currently found by position)
+- Modern rendering (replace legacy OpenGL with buffers/shaders)
+- Split up `app.py` (~1,180 lines)
+
+### Recommended order:
+1. Fix the bugs above + add regression tests
+2. Add shape caching and undo rework
+3. Build #1 and #2 (drag-to-extrude + draggable geometry) — this makes rCad start to feel like Shapr3D
+4. Build #3, #4, #8 together (shared sketch rewrite)
+
+## Caveats:
+Shapr3D uses the commercial Parasolid kernel; OpenCascade fails more often on complex fillets/shells/lofts. Repo has no LICENSE file — check SolveSpace's GPLv3 before distributing.
