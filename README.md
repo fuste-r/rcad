@@ -48,7 +48,7 @@ Workflow: choose a plane (or select a face and choose "Selected face"), **New Sk
 
 ## Limitations
 
-Faces and edges are re-found by geometry, not topological IDs, so an upstream change can leave a later feature unable to find its target. Push/pull supports planar faces only. There is no undo/redo yet.
+Faces and edges are re-found by geometry, not topological IDs, so an upstream change can leave a later feature unable to find its target. Push/pull supports planar faces only.
 
 ## Tests
 

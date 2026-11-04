@@ -211,8 +211,17 @@ class Document:
             edges = [_find_edge(part, m) for m in f.edges]
             if not edges or any(e is None for e in edges):
                 raise ValueError("edge no longer exists")
-            solid = _main_solid(part)
-            return solid.fillet(f.value, edges) if f.kind == "fillet" else solid.chamfer(f.value, None, edges)
+            solids = part.solids()
+            modified: list[Solid] = []
+            for s in solids:
+                s_edges = [e for e in edges if e in s.edges()]
+                if not s_edges:
+                    modified.append(s)
+                elif f.kind == "fillet":
+                    modified.append(s.fillet(f.value, s_edges))
+                else:
+                    modified.append(s.chamfer(f.value, None, s_edges))
+            return modified[0] if len(modified) == 1 else Solid(*modified).fuse().clean()
         raise ValueError(f"unknown feature {f.kind}")
 
     @staticmethod

@@ -89,7 +89,7 @@ class ExpressionDialog(QDialog):
 class VariablesDialog(QDialog):
     def __init__(self, parent, variables: dict[str, float] | None = None):
         super().__init__(parent)
-        self.variables = dict(variables or {})
+        self._vars = dict(variables or {})
         self.setWindowTitle("Expressions and Variables")
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -105,12 +105,16 @@ class VariablesDialog(QDialog):
         layout.addWidget(self.list)
         add_btn.clicked.connect(self._add)
         remove_btn.clicked.connect(self._remove)
+        box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        box.accepted.connect(self.accept)
+        box.rejected.connect(self.reject)
+        layout.addWidget(box)
         self.refresh()
         self.name_edit.setFocus()
 
     def refresh(self):
         self.list.clear()
-        for name in self.variables:
+        for name in self._vars:
             self.list.addItem(name)
         self.name_edit.clear()
         self.value_edit.clear()
@@ -121,7 +125,7 @@ class VariablesDialog(QDialog):
         if not name or not value:
             return
         try:
-            self.variables[name] = float(value)
+            self._vars[name] = float(value)
         except ValueError:
             return
         self.list.addItem(name)
@@ -133,12 +137,12 @@ class VariablesDialog(QDialog):
         if item is None:
             return
         name = item.text()
-        del self.variables[name]
+        del self._vars[name]
         self.list.takeItem(self.list.row(item))
         self.refresh()
 
     def variables(self) -> dict[str, float]:
-        return dict(self.variables)
+        return dict(self._vars)
 
 
 class MainWindow(QMainWindow):
@@ -184,8 +188,8 @@ class MainWindow(QMainWindow):
         self._restoring = False
         self._mirror_axis = None   # (a_idx, b_idx, line_idx) for symmetry tool
         self._mirroring = False
-        self._sketch_undo: list[dict] = []
-        self._sketch_redo: list[dict] = []
+        self._sketch_undo: list[tuple[int, dict]] = []
+        self._sketch_redo: list[tuple[int, dict]] = []
         self._sketch_restoring = False
         QShortcut(QKeySequence(Qt.Key_Escape), self, self.cancel)
         self.resize(1300, 800)
@@ -225,6 +229,7 @@ class MainWindow(QMainWindow):
         v_btn = self._act("Variables", self._edit_variables, "Edit parametric variables and expressions", shortcut="Ctrl+Shift+V")
         self.variables_tb.addAction(v_btn)
         self.variables_tb.addSeparator()
+        file_tb.addWidget(self.variables_tb)
         file_tb.addWidget(QLabel(" Units: "))
         undo_a = self._act("Undo (Ctrl+Z)", self.undo, shortcut=QKeySequence.Undo)
         redo_a = self._act("Redo (Ctrl+Shift+Z)", self.redo, shortcut=QKeySequence.Redo)
@@ -315,6 +320,7 @@ class MainWindow(QMainWindow):
         self.snap.setSuffix(f" {u.name}")
         self.snap.setValue(u.snap)
         self.view.unit_mm = u.mm
+        self.view.unit = u
         self.refresh()
 
     def set_units(self, name: str):
@@ -416,11 +422,11 @@ class MainWindow(QMainWindow):
     def _push_sketch_undo(self):
         if self._sketch_restoring or self.mode != "sketch":
             return
-        self._sketch_undo.append(self.sketch.to_dict())
+        self._sketch_undo.append((self.sketch_index, self.sketch.to_dict()))
         self._sketch_redo.clear()
 
-    def _restore_sketch(self, d):
-        sk = self.sketch
+    def _restore_sketch(self, d, index):
+        sk = self.doc.features[index].sketch
         plane = d["plane"]
         sk.plane = SketchPlane(tuple(plane["origin"]), tuple(plane["xdir"]), tuple(plane["normal"]))
         sk.points = [list(p) for p in d["points"]]
@@ -440,8 +446,9 @@ class MainWindow(QMainWindow):
         if not self._sketch_undo:
             return False
         self._sketch_restoring = True
-        self._sketch_redo.append(self.sketch.to_dict())
-        self._restore_sketch(self._sketch_undo.pop())
+        self._sketch_redo.append((self.sketch_index, self.sketch.to_dict()))
+        sk_idx, d = self._sketch_undo.pop()
+        self._restore_sketch(d, sk_idx)
         self._sketch_restoring = False
         return True
 
@@ -449,8 +456,9 @@ class MainWindow(QMainWindow):
         if not self._sketch_redo:
             return False
         self._sketch_restoring = True
-        self._sketch_undo.append(self.sketch.to_dict())
-        self._restore_sketch(self._sketch_redo.pop())
+        self._sketch_undo.append((self.sketch_index, self.sketch.to_dict()))
+        sk_idx, d = self._sketch_redo.pop()
+        self._restore_sketch(d, sk_idx)
         self._sketch_restoring = False
         return True
 
@@ -463,6 +471,7 @@ class MainWindow(QMainWindow):
         self._redo.append(self.doc.to_dict())
         d = self._undo.pop()
         self.doc = Document([Feature.from_dict(f) for f in d["features"]], units=d.get("units", "mm"))
+        self.doc.variables = d.get("variables", {})
         self.sketch_index = -1
         self.set_mode("model")
         self.doc.rebuild()
@@ -480,6 +489,7 @@ class MainWindow(QMainWindow):
         self._undo.append(self.doc.to_dict())
         d = self._redo.pop()
         self.doc = Document([Feature.from_dict(f) for f in d["features"]], units=d.get("units", "mm"))
+        self.doc.variables = d.get("variables", {})
         self.sketch_index = -1
         self.set_mode("model")
         self.doc.rebuild()
@@ -756,8 +766,8 @@ class MainWindow(QMainWindow):
                     if expr:
                         new = [Constraint("expression", [pts[0], pts[1]], expression=expr)]
                         self.statusBar().showMessage(f"Expression: {expr}", 6000)
-                        return new
-                return []
+                        self._solve_sketch()
+                return
             elif kind == "distance":
                 ends = pts if len(pts) == 2 and not lines else list(sk.lines[lines[0]]) if len(lines) == 1 and not pts else None
                 if ends:
@@ -802,9 +812,9 @@ class MainWindow(QMainWindow):
                         return
                 else:
                     # We have a mirror axis; mirror the selected items
-                    if not pts and not lines:
+                    if not pts and not lines and not circles:
                         self.statusBar().showMessage(
-                            "Select points or lines to mirror (or press Escape to cancel).", 6000
+                            "Select points, lines, or circles to mirror (or press Escape to cancel).", 6000
                         )
                         return
                     self._push_sketch_undo()
@@ -813,20 +823,13 @@ class MainWindow(QMainWindow):
                     # Exclude the mirror line and its endpoints from the items to mirror
                     lines = [i for i in lines if i != mirror_line_idx]
                     pts = [i for i in pts if i not in (a_idx, b_idx)]
+                    circles = [i for i in circles if not (sk.circles[i][0] in (a_idx, b_idx))]
                     a = sk.points[a_idx]
                     b = sk.points[b_idx]
                     new_constraints = []
-                    # Fix the mirror line endpoints so the axis stays in place
+                    # Fix only the mirror line endpoints so the axis stays in place
                     new_constraints.append(Constraint("fixed", [a_idx]))
                     new_constraints.append(Constraint("fixed", [b_idx]))
-                    # Keep original geometry (points) fixed so the original line stays put
-                    points_to_fix = set(pts)
-                    for l_idx in lines:
-                        (p1, p2) = sk.lines[l_idx]
-                        points_to_fix.add(p1)
-                        points_to_fix.add(p2)
-                    for p in points_to_fix:
-                        new_constraints.append(Constraint("fixed", [p]))
 
                     mirrored_points = {}
 
@@ -846,7 +849,13 @@ class MainWindow(QMainWindow):
                         (p1, p2) = sk.lines[l_idx]
                         new_p1_idx = mirrored_point(p1)
                         new_p2_idx = mirrored_point(p2)
-                        mirror_line_idx_new = sk.add_line(new_p1_idx, new_p2_idx)
+                        sk.add_line(new_p1_idx, new_p2_idx)
+
+                    for ci in circles:
+                        center_idx, r = sk.circles[ci]
+                        new_center_idx = mirrored_point(center_idx)
+                        sk.circles.append((new_center_idx, r))
+
                     if new_constraints:
                         sk.constraints += new_constraints
                         self._mirror_axis = None
@@ -854,7 +863,7 @@ class MainWindow(QMainWindow):
                         self.view.sketch_sel.clear()
                         self._solve_sketch()
                         self.statusBar().showMessage(
-                            f"Mirrored {len(pts) + len(lines)} item(s).", 6000
+                            f"Mirrored {len(pts) + len(lines) + len(circles)} item(s).", 6000
                         )
                     else:
                         self.statusBar().showMessage(
@@ -1077,6 +1086,7 @@ class MainWindow(QMainWindow):
         if f.kind == "sketch":
             self.enter_sketch(i)
             return
+        self._push_undo()
         if f.kind == "extrude":
             dlg = ExtrudeDialog(self, f.value, f.auto, f.cut, unit=self.unit)
             if not dlg.exec():
@@ -1098,6 +1108,7 @@ class MainWindow(QMainWindow):
     def toggle_layer(self, item):
         i = self.features.row(item)
         f = self.doc.features[i]
+        self._push_undo()
         f.visible = item.checkState() == Qt.Checked
         if f.kind == "sketch":
             self.view.overlay_sketches = [g.sketch for g in self.doc.features if g.kind == "sketch" and g.visible]
@@ -1110,6 +1121,7 @@ class MainWindow(QMainWindow):
         i = self.features.currentRow()
         if i < 0:
             return
+        self._push_undo()
         self.doc.delete(i)
         self.rebuild()
 
@@ -1123,6 +1135,10 @@ class MainWindow(QMainWindow):
     def _load(self, doc, path):
         self.doc, self.path = doc, path
         self.sketch_index = -1
+        self._undo.clear()
+        self._redo.clear()
+        self._sketch_undo.clear()
+        self._sketch_redo.clear()
         self.set_mode("model")
         self.mark_dirty(False)
         self._apply_units()

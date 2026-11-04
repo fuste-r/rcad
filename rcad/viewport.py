@@ -12,6 +12,7 @@ from .camera import Camera, point_segment_dist, ray_plane, ray_triangles
 from .kernel import MeshData
 from .sketch import Sketch
 from .theme import LIGHT, Theme
+from .units import MM, Unit
 
 DRAG_PX = 4
 
@@ -32,6 +33,7 @@ class Viewport(QOpenGLWidget):
         self._cube_tex: dict[str, int] = {}
         self._cube_tex_key = None
         self.unit_mm = 1.0  # millimetres per display unit; the grid steps in whole display units
+        self.unit = MM  # display unit for dimension labels
         self.mesh: MeshData | None = None
         self.sketch: Sketch | None = None
         self.overlay_sketches: list[Sketch] = []  # sketches on visible layers, drawn faded
@@ -524,7 +526,7 @@ class Viewport(QOpenGLWidget):
                 sx, sy = self.camera.project(pt, w, h)[0][:2]
                 if np.isnan(sx) or np.isnan(sy):
                     continue
-                positions.append((int(sx), int(sy), f"{c.value:g}"))
+                positions.append((int(sx), int(sy), self.unit.fmt(c.value)))
             except Exception:
                 continue
         while len(self._dim_labels) < len(positions):
