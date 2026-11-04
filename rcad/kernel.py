@@ -28,6 +28,7 @@ class Feature:
     profiles: list | None = None  # extrude: points inside the sketch regions to use; None = all regions
     auto: bool = False  # extrude: cut when the extrusion mostly lies inside the body, otherwise add
     resolved_cut: bool | None = field(default=None, compare=False, repr=False)  # last auto decision
+    version: int = 0  # incremented on edit to enable shape caching
 
     def label(self, unit: Unit = MM) -> str:
         if self.kind == "sketch":
@@ -157,6 +158,9 @@ class Document:
     errors: dict[int, str] = field(default_factory=dict)
     units: str = "mm"  # display/input units; geometry is always stored in mm
     variables: dict[str, float] = field(default_factory=dict)  # expression variables
+    _shapes: list[Shape | None] = field(default_factory=list, repr=False)  # cached shape after each feature
+    _dirty_from: int = 0  # index from which to recompute; 0 = full rebuild
+    _last_versions: list[int] = field(default_factory=list, repr=False)  # feature version at last rebuild
 
     def delete(self, i: int) -> None:
         """Remove a feature; deleting a sketch also removes the extrudes that use it."""
@@ -168,16 +172,51 @@ class Document:
             if g.kind == "extrude":
                 g.sketch_ref -= sum(1 for d in drop if d < g.sketch_ref)
         self.features = keep
+        # invalidating the whole cache is safe: indices shifted
+        self._shapes = []
+        self._dirty_from = 0
+        self._last_versions = []
 
-    def rebuild(self) -> None:
-        """Replay the history; the first failing feature stops the replay and is reported in `errors`."""
+    def invalidate_from(self, i: int) -> None:
+        """Mark the cache invalid from feature i onward (their inputs changed)."""
+        self._dirty_from = max(0, i)
+
+    @staticmethod
+    def _feature_version(f: Feature) -> int:
+        """Combined version of a feature and its sketch (if present)."""
+        v = f.version
+        if f.sketch is not None and f.sketch.version > v:
+            v = f.sketch.version
+        return v
+
+    def rebuild(self, dirty_from: int | None = None) -> None:
+        """Replay the history; the first failing feature stops the replay and is reported in `errors`.
+
+        `dirty_from` (default: auto-detected from feature/sketch versions, or the cached `_dirty_from`)
+        is the first index to recompute; features before it reuse their cached shapes.
+        Pass 0 for a full rebuild.
+        """
+        if dirty_from is None and self._shapes:
+            # find the first feature whose version (or its sketch's version) changed since the last rebuild
+            dirty_from = next((i for i, f in enumerate(self.features)
+                               if i >= len(self._last_versions) or self._last_versions[i] != self._feature_version(f)),
+                               self._dirty_from)
+        if dirty_from is not None:
+            self._dirty_from = dirty_from
+        start = self._dirty_from
         part, self.errors = None, {}
         for i, f in enumerate(self.features):
+            if i < start and i < len(self._shapes) and self._shapes[i] is not None:
+                part = self._shapes[i]
+                continue
             try:
                 part = self._apply(part, f)
             except Exception as e:  # kernel errors are reported per feature
                 self.errors[i] = str(e) or type(e).__name__
                 break
+            # cache this shape (even for sketches/hidden features, part is unchanged)
+            self._shapes = self._shapes[:i] + [part]
+        self._last_versions = [self._feature_version(f) for f in self.features]
         self.part = part
         self.mesh = build_mesh(part) if part is not None else None
 

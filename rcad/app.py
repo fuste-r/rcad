@@ -685,6 +685,7 @@ class MainWindow(QMainWindow):
             b = pi if pi is not None else sk.add_point(*uv)
             if a != b:
                 sk.add_line(a, b)
+                sk.version += 1
             self.pending = (b, tuple(sk.points[b])) if pi is None else None
             self._solve_sketch()
         elif self.tool == "rect":
@@ -694,6 +695,7 @@ class MainWindow(QMainWindow):
             (u0, v0), (u1, v1) = self.pending[1], uv
             if abs(u1 - u0) > 1e-9 and abs(v1 - v0) > 1e-9:
                 sk.add_rect(u0, v0, u1, v1)
+                sk.version += 1
                 self._solve_sketch()
             self.set_tool("select")  # so the new region can be highlighted right away
         elif self.tool == "circle":
@@ -705,6 +707,7 @@ class MainWindow(QMainWindow):
             if r > 1e-9:
                 c = c_idx if c_idx is not None else sk.add_point(*c_uv)
                 sk.add_circle(c, r)
+                sk.version += 1
                 self._solve_sketch()
             self.set_tool("select")
 
@@ -766,6 +769,7 @@ class MainWindow(QMainWindow):
                     if expr:
                         new = [Constraint("expression", [pts[0], pts[1]], expression=expr)]
                         self.statusBar().showMessage(f"Expression: {expr}", 6000)
+                        sk.version += 1
                         self._solve_sketch()
                 return
             elif kind == "distance":
@@ -858,6 +862,7 @@ class MainWindow(QMainWindow):
 
                     if new_constraints:
                         sk.constraints += new_constraints
+                        sk.version += 1
                         self._mirror_axis = None
                         self._mirroring = False
                         self.view.sketch_sel.clear()
@@ -878,6 +883,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Select the right items for '{kind}' ({CONSTRAINT_KINDS[kind][0]}).", 6000)
             return
         sk.constraints += new
+        sk.version += 1
         if not self._solve_sketch():
             del sk.constraints[-len(new):]
             self.sketch.solve()
@@ -894,6 +900,7 @@ class MainWindow(QMainWindow):
                     self._push_sketch_undo()
                     old = c.expression
                     c.expression = expr
+                    sk.version += 1
                     if not self._solve_sketch():
                         c.expression = old
                         self.sketch.solve()
@@ -905,6 +912,7 @@ class MainWindow(QMainWindow):
         v, ok = self.ask_length("Dimension", "Value", c.value)
         if ok:
             old, c.value = c.value, v
+            sk.version += 1
             if not self._solve_sketch():
                 c.value = old
                 self.sketch.solve()
@@ -915,6 +923,7 @@ class MainWindow(QMainWindow):
         if i >= 0:
             self._push_sketch_undo()
             self.sketch.remove_constraint(i)
+            sk.version += 1
             self._solve_sketch()
 
     def delete_selection(self):
@@ -923,6 +932,7 @@ class MainWindow(QMainWindow):
         for kind in ("l", "c", "p"):  # deleting points last keeps the other indices stable
             for idx in sorted((i for k, i in self.view.sketch_sel if k == kind), reverse=True):
                 sk.delete(kind, idx)
+        sk.version += 1
         self.view.sketch_sel.clear()
         self._solve_sketch()
 
@@ -973,6 +983,7 @@ class MainWindow(QMainWindow):
         f = self.doc.features[feat_i]
         step = 0.5 if not (mods & Qt.ShiftModifier) else 0.1
         f.value = max(1e-4, f.value + (delta / 120.0) * step)
+        f.version += 1
         self.rebuild()
         self.statusBar().showMessage(f"{f.kind.title()} {self.unit.fmt(f.value)}", 2000)
 
@@ -1099,10 +1110,12 @@ class MainWindow(QMainWindow):
             new = (v, f.cut, f.auto)
         old = (f.value, f.cut, f.auto)
         f.value, f.cut, f.auto = new
+        f.version += 1
         self.rebuild()
         if i in self.doc.errors:
             QMessageBox.warning(self, "Operation failed", self.doc.errors[i])
             f.value, f.cut, f.auto = old
+            f.version += 1
             self.rebuild()
 
     def toggle_layer(self, item):
@@ -1115,6 +1128,7 @@ class MainWindow(QMainWindow):
             self.mark_dirty()
             self._update_regions()
         else:
+            f.version += 1
             self.rebuild()
 
     def delete_feature(self):

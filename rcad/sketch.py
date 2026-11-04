@@ -112,6 +112,7 @@ class Sketch:
     variables: dict[str, float] = field(default_factory=dict)  # expression variables
     status: str = "unsolved"
     dof: int = -1
+    version: int = 0  # incremented on edit to enable shape caching
 
     # -- editing
     def add_point(self, u: float, v: float) -> int:
@@ -338,7 +339,8 @@ class Sketch:
     def to_dict(self) -> dict:
         return {"plane": asdict(self.plane), "points": [list(p) for p in self.points], "lines": [list(l) for l in self.lines],
                 "circles": [list(c) for c in self.circles],
-                "constraints": [asdict(c) for c in self.constraints], "selection": [list(p) for p in self.selection]}
+                "constraints": [asdict(c) for c in self.constraints], "selection": [list(p) for p in self.selection],
+                "version": self.version}
 
     @staticmethod
     def from_dict(d: dict) -> "Sketch":
@@ -349,6 +351,7 @@ class Sketch:
         sk.circles = [tuple(c) for c in d["circles"]]
         sk.constraints = [Constraint(**c) for c in d["constraints"]]
         sk.selection = [tuple(p) for p in d.get("selection", [])]
+        sk.version = d.get("version", 0)
         return sk
 
 
