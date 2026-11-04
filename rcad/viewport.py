@@ -21,6 +21,7 @@ class Viewport(QOpenGLWidget):
     clicked = Signal(float, float, object, object)  # x, y, Qt.MouseButton, Qt.KeyboardModifier
     hovered = Signal(float, float)
     scrolled = Signal(float, float, int, object)  # x, y, angle delta, Qt.KeyboardModifier
+    extrude_commit = Signal(float, tuple, tuple)  # distance_mm, center, normal
 
     def __init__(self):
         super().__init__()
@@ -53,6 +54,13 @@ class Viewport(QOpenGLWidget):
         self._norms = np.zeros((0, 3), np.float32)
         self._segs = np.zeros((0, 2, 3))
         self._seg_edge = np.zeros(0, int)
+        self._extrude_state = None  # {"face", "center", "normal", "start_screen"}
+        self._extrude_dist = 0.0
+        self._extrude_preview = None  # MeshData for live preview
+        self._extrude_label = QLabel(self)
+        self._extrude_label.setStyleSheet(
+            "color: #ffffff; background: rgba(0,128,0,180); padding: 2px 6px; "
+            "border-radius: 3px; font-weight: bold;")
 
     # -- data
     def set_mesh(self, mesh: MeshData | None):
@@ -206,6 +214,7 @@ class Viewport(QOpenGLWidget):
 
         self._draw_grid()
         self._draw_model()
+        self._draw_extrude_preview()
         self._draw_sketch()
         self._draw_cube()
 
@@ -276,6 +285,76 @@ class Viewport(QOpenGLWidget):
             GL.glEnd()
         GL.glLineWidth(1)
         GL.glEnable(GL.GL_LIGHTING)
+
+    def _update_extrude_preview(self):
+        """Compute the offset face vertices for the drag-to-extrude preview."""
+        if self._extrude_state is None or self.mesh is None:
+            self._extrude_preview = None
+            return
+        c, n = self._extrude_state["center"], self._extrude_state["normal"]
+        d = self._extrude_dist
+        if abs(d) < 1e-6:
+            self._extrude_preview = None
+            return
+        info = self.mesh.faces[self._extrude_state["face"]]
+        self._extrude_preview = np.array(
+            [np.asarray(p, float) + d * n for e in self.mesh.edges for p in e.polyline],
+            dtype=np.float32)
+
+    def _draw_extrude_preview(self):
+        """Draw the drag-to-extrude preview: offset face outline + drag axis."""
+        if self._extrude_state is None or self.mesh is None:
+            self._extrude_label.hide()
+            return
+        c, n = self._extrude_state["center"], self._extrude_state["normal"]
+        d = self._extrude_dist
+        if abs(d) < 1e-6:
+            return
+        GL.glDisable(GL.GL_LIGHTING)
+        t = self.theme
+        # 1. Drag axis: thick line from face center to offset position
+        end = c + d * n
+        GL.glLineWidth(3)
+        GL.glColor3f(*t.model)
+        GL.glBegin(GL.GL_LINES)
+        GL.glVertex3f(*c)
+        GL.glVertex3f(*end)
+        GL.glEnd()
+        # 2. Arrowhead (small V at the tip)
+        up = np.array([0, 1, 0], float)
+        side = np.cross(n, up)
+        if np.linalg.norm(side) < 1e-9:
+            side = np.array([1, 0, 0], float)
+        side /= np.linalg.norm(side)
+        L = 0.15 * max(1.0, abs(d))
+        b1 = end - L * n + side * L * 0.5
+        b2 = end - L * n - side * L * 0.5
+        GL.glLineWidth(2)
+        GL.glBegin(GL.GL_LINES)
+        GL.glVertex3f(*b1)
+        GL.glVertex3f(*end)
+        GL.glVertex3f(*b2)
+        GL.glEnd()
+        # 3. Offset face outline (wireframe of the extruded top)
+        GL.glLineWidth(2)
+        GL.glColor3f(0.0, 0.9, 0.6)  # teal for preview
+        for e in self.mesh.edges:
+            pts = [np.asarray(p, float) + d * n for p in e.polyline]
+            for i in range(len(pts) - 1):
+                GL.glBegin(GL.GL_LINES)
+                GL.glVertex3f(*pts[i])
+                GL.glVertex3f(*pts[i + 1])
+                GL.glEnd()
+        GL.glLineWidth(1)
+        GL.glEnable(GL.GL_LIGHTING)
+
+        # 4. Distance label (project end point to screen)
+        w, h = self.width(), self.height()
+        screen = self.camera.project(end, w, h)
+        x, y = screen[0], screen[1]
+        self._extrude_label.setText(f"{d:.2f} mm")
+        self._extrude_label.move(int(x) + 10, max(int(y) - 12, 2))
+        self._extrude_label.show()
 
     def _draw_sketch_geometry(self, sk: Sketch, selected: set, base_color):
         pl = sk.plane
@@ -444,9 +523,22 @@ class Viewport(QOpenGLWidget):
     def mousePressEvent(self, e):
         p = e.position()
         self._cube_press = e.button() == Qt.LeftButton and viewcube.inside(p.x(), p.y(), self._cube_rect())
-        self._press = (e.position(), e.button(), e.modifiers())
-        self._last = e.position()
+        self._press = (p, e.button(), e.modifiers())
+        self._last = p
         self._dragged = False
+        # Drag-to-extrude: left-click on a selected planar face starts the drag
+        if (e.button() == Qt.LeftButton and not self._cube_press
+                and not (e.modifiers() & Qt.ShiftModifier) and self.sel_faces and self.mesh):
+            face = self.pick_face(p.x(), p.y())
+            if face in self.sel_faces:
+                info = self.mesh.faces[face]
+                if info.normal is not None:
+                    self._extrude_state = {"face": face,
+                                           "center": np.array(info.center, float),
+                                           "normal": np.array(info.normal, float),
+                                           "start_screen": (p.x(), p.y())}
+                    self._extrude_dist = 0.0
+                    self._extrude_preview = None
 
     def mouseMoveEvent(self, e):
         p = e.position()
@@ -474,6 +566,15 @@ class Viewport(QOpenGLWidget):
             self.camera.orbit(-d.x() * 0.4, -d.y() * 0.4)
         elif btn == Qt.MiddleButton or (btn == Qt.LeftButton and mods & Qt.ShiftModifier):
             self.camera.pan(d.x(), d.y(), self.height())
+        elif self._extrude_state is not None:
+            # Drag-to-extrude: project cursor onto the face plane, measure along normal
+            w, h = self.width(), self.height()
+            o, rd = self.camera.ray(p.x(), p.y(), w, h)
+            c, n = self._extrude_state["center"], self._extrude_state["normal"]
+            proj = ray_plane(o, rd, c, n)
+            if proj is not None:
+                self._extrude_dist = float(np.dot(proj - c, n))
+            self._update_extrude_preview()
         self.update()
 
     def mouseReleaseEvent(self, e):
@@ -485,6 +586,15 @@ class Viewport(QOpenGLWidget):
                     self._snap_view(face)
             else:
                 self.clicked.emit(p.x(), p.y(), self._press[1], self._press[2])
+        # Commit drag-to-extrude
+        if self._extrude_state is not None and self._dragged:
+            c, n = self._extrude_state["center"], self._extrude_state["normal"]
+            self.extrude_commit.emit(self._extrude_dist,
+                                    tuple(map(float, c)), tuple(map(float, n)))
+            self._extrude_state = None
+            self._extrude_dist = 0.0
+            self._extrude_preview = None
+            self.update()
         self._press = None
         self._cube_press = False
 

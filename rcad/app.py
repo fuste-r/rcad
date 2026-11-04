@@ -163,6 +163,7 @@ class MainWindow(QMainWindow):
         self.view.clicked.connect(self.on_click)
         self.view.hovered.connect(self.on_hover)
         self.view.scrolled.connect(self.on_wheel_adjust)
+        self.view.extrude_commit.connect(self.on_extrude_commit)
 
         self.features = QListWidget()
         self.features.itemDoubleClicked.connect(self.edit_feature)
@@ -1075,6 +1076,12 @@ class MainWindow(QMainWindow):
         if ok and v != 0:
             self.commit(Feature("pushpull", value=v, face=(tuple(map(float, info.center)),
                                                            tuple(map(float, info.normal)))))
+
+    def on_extrude_commit(self, dist: float, center: tuple, normal: tuple):
+        """Drag-to-extrude: commit a pushpull feature from the drag distance."""
+        if abs(dist) < 0.01:
+            return
+        self.commit(Feature("pushpull", value=dist, face=(center, normal)))
 
     def _edge_feature(self, kind):
         if not self.view.sel_edges:
