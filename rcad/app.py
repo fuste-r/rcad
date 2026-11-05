@@ -162,6 +162,8 @@ class MainWindow(QMainWindow):
         self._sketch_press_hit = None   # (kind, index) of the geometry under the cursor at press
         self._sketch_drag_orig = None  # {point_index: [u, v]} restored if the post-drag solve fails
         self._sketch_drag_active = False
+        self._sketch_drag_kind = None   # (kind, index) of the element currently being dragged
+        self._sketch_drag_idx = None
 
         self.view = Viewport()
         self.setCentralWidget(self.view)
@@ -622,6 +624,8 @@ class MainWindow(QMainWindow):
                     return
                 kind, idx = self._sketch_press_hit
                 self._sketch_drag_active = True
+                self._sketch_drag_kind = kind
+                self._sketch_drag_idx = idx
                 self._sketch_drag_orig = self._collect_drag_points(kind, idx)
                 self._push_sketch_undo()  # snapshot so a failed solve can revert
             cur_uv = self.view.sketch_uv(x, y)
@@ -629,11 +633,15 @@ class MainWindow(QMainWindow):
                 return
             du = cur_uv[0] - self._sketch_press_uv[0]
             dv = cur_uv[1] - self._sketch_press_uv[1]
+            du, dv = self._clamp_drag_delta(self._sketch_drag_kind, self._sketch_drag_idx, du, dv)
             sk = self.sketch
             orig = self._sketch_drag_orig
             if orig is not None:
                 for pi, (u, v) in orig.items():
                     sk.points[pi] = [u + du, v + dv]
+            # Show the silhouette only over the range this element is allowed to
+            # sweep to (a fixed-angle line moves only along its legal direction).
+            self._update_drag_silhouette(sk, du, dv)
             if self._sketch_press_hit is not None:
                 self.view.sketch_sel = {self._sketch_press_hit}  # highlight while dragging
             self.view.update()
@@ -644,6 +652,73 @@ class MainWindow(QMainWindow):
             self._sketch_press_uv = None
             self._sketch_press_hit = None
             self._sketch_drag_orig = None
+            self._sketch_drag_kind = None
+            self._sketch_drag_idx = None
+            self.view.preview = []
+
+    def _line_angle_fixed(self, idx):
+        """Does the dragged line have a constraint fixing its angle?
+
+        A horizontal/vertical line, or a line constrained parallel/perpendicular
+        to another, can only translate perpendicular to its own direction.
+        """
+        for c in self.sketch.constraints:
+            if c.kind in ("horizontal", "vertical") and c.refs == [idx]:
+                return True
+            if c.kind in ("parallel", "perpendicular") and idx in c.refs:
+                return True
+        return False
+
+    def _clamp_drag_delta(self, kind, idx, du, dv):
+        """Project (du, dv) onto the subspace the constraints allow.
+
+        For a line with a fixed angle the legal motion is the direction
+        perpendicular to the line; the perpendicular component of the cursor
+        delta is dropped so the line never rotates off its angle. Returns the
+        input unchanged when no restriction applies.
+        """
+        if kind != "l" or not self._line_angle_fixed(idx):
+            return du, dv
+        sk = self.sketch
+        a, b = sk.lines[idx]
+        pa = sk.points[a]
+        pb = sk.points[b]
+        dx, dy = pb[0] - pa[0], pb[1] - pa[1]
+        L = math.hypot(dx, dy)
+        if L < 1e-9:
+            return du, dv
+        dx, dy = dx / L, dy / L          # unit direction of the line
+        px, py = -dy, dx                # unit perpendicular = allowed translation
+        s = du * px + dv * py           # scalar component along the allowed direction
+        return s * px, s * py
+
+    def _update_drag_silhouette(self, sk, du, dv):
+        """Set the viewport preview to the range the dragged line is allowed to
+        sweep over: for a fixed-angle line, the strip between its start and
+        current positions along the allowed (perpendicular) direction."""
+        kind, idx = self._sketch_drag_kind, self._sketch_drag_idx
+        if kind != "l" or not self._line_angle_fixed(idx):
+            self.view.preview = []
+            return
+        orig = self._sketch_drag_orig
+        if orig is None:
+            self.view.preview = []
+            return
+        a, b = sk.lines[idx]
+        p0a = orig[a]
+        p0b = orig[b]
+        p1a = sk.points[a]
+        p1b = sk.points[b]
+        if all(math.hypot(x1 - x0, y1 - y0) < 1e-9
+               for (x0, y0), (x1, y1) in ((p0a, p1a), (p0b, p1b))):
+            self.view.preview = []   # no sweep yet; keep it clean
+            return
+        pl = sk.plane
+        # Closed strip boundary (first point repeated so the LINE_STRIP loops):
+        # start-A -> current-A -> current-B -> start-B -> start-A
+        quad = [pl.to3d(*p0a), pl.to3d(*p1a), pl.to3d(*p1b),
+               pl.to3d(*p0b), pl.to3d(*p0a)]
+        self.view.preview = [np.array(quad, dtype=float)]
 
     def _collect_drag_points(self, kind, idx):
         """Indices of the sketch points that move with the dragged element."""
