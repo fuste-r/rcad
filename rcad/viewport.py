@@ -8,7 +8,7 @@ from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QLabel
 
 from . import viewcube
-from .camera import Camera, point_segment_dist, ray_plane, ray_triangles
+from .camera import Camera, FOV_TAN, point_segment_dist, ray_plane, ray_triangles
 from .kernel import MeshData
 from .sketch import Sketch
 from .theme import LIGHT, Theme
@@ -54,9 +54,8 @@ class Viewport(QOpenGLWidget):
         self._norms = np.zeros((0, 3), np.float32)
         self._segs = np.zeros((0, 2, 3))
         self._seg_edge = np.zeros(0, int)
-        self._extrude_state = None  # {"face", "center", "normal", "start_screen"}
+        self._extrude_state = None  # {"face", "center", "normal", "start_screen", "outline"}
         self._extrude_dist = 0.0
-        self._extrude_preview = None  # MeshData for live preview
         self._extrude_label = QLabel(self)
         self._extrude_label.setStyleSheet(
             "color: #ffffff; background: rgba(0,128,0,180); padding: 2px 6px; "
@@ -286,20 +285,19 @@ class Viewport(QOpenGLWidget):
         GL.glLineWidth(1)
         GL.glEnable(GL.GL_LIGHTING)
 
-    def _update_extrude_preview(self):
-        """Compute the offset face vertices for the drag-to-extrude preview."""
-        if self._extrude_state is None or self.mesh is None:
-            self._extrude_preview = None
-            return
-        c, n = self._extrude_state["center"], self._extrude_state["normal"]
-        d = self._extrude_dist
-        if abs(d) < 1e-6:
-            self._extrude_preview = None
-            return
-        info = self.mesh.faces[self._extrude_state["face"]]
-        self._extrude_preview = np.array(
-            [np.asarray(p, float) + d * n for e in self.mesh.edges for p in e.polyline],
-            dtype=np.float32)
+    def _face_outline(self, face_idx):
+        """Boundary edges of a face as (vertex_a, vertex_b) pairs of global vertex indices."""
+        m = self.mesh
+        if m is None or not len(m.tris) or not (0 <= face_idx < len(m.tri_face)):
+            return []
+        tf, tris = m.tri_face, m.tris
+        count: dict[tuple[int, int], int] = {}
+        for i in np.where(tf == face_idx)[0]:
+            a, b, c = tris[i]
+            for e in ((a, b), (b, c), (c, a)):
+                k = (min(e), max(e))
+                count[k] = count.get(k, 0) + 1
+        return [(u, v) for (u, v), n in count.items() if n == 1]
 
     def _draw_extrude_preview(self):
         """Draw the drag-to-extrude preview: offset face outline + drag axis."""
@@ -335,16 +333,17 @@ class Viewport(QOpenGLWidget):
         GL.glVertex3f(*end)
         GL.glVertex3f(*b2)
         GL.glEnd()
-        # 3. Offset face outline (wireframe of the extruded top)
+        # 3. Offset silhouette of the selected face (outline of the extruded top)
+        verts = self.mesh.verts
         GL.glLineWidth(2)
         GL.glColor3f(0.0, 0.9, 0.6)  # teal for preview
-        for e in self.mesh.edges:
-            pts = [np.asarray(p, float) + d * n for p in e.polyline]
-            for i in range(len(pts) - 1):
-                GL.glBegin(GL.GL_LINES)
-                GL.glVertex3f(*pts[i])
-                GL.glVertex3f(*pts[i + 1])
-                GL.glEnd()
+        for a, b in self._extrude_state["outline"]:
+            pa = np.asarray(verts[a], float) + d * n
+            pb = np.asarray(verts[b], float) + d * n
+            GL.glBegin(GL.GL_LINES)
+            GL.glVertex3f(*pa)
+            GL.glVertex3f(*pb)
+            GL.glEnd()
         GL.glLineWidth(1)
         GL.glEnable(GL.GL_LIGHTING)
 
@@ -536,9 +535,9 @@ class Viewport(QOpenGLWidget):
                     self._extrude_state = {"face": face,
                                            "center": np.array(info.center, float),
                                            "normal": np.array(info.normal, float),
-                                           "start_screen": (p.x(), p.y())}
+                                           "start_screen": (p.x(), p.y()),
+                                           "outline": self._face_outline(face)}
                     self._extrude_dist = 0.0
-                    self._extrude_preview = None
 
     def mouseMoveEvent(self, e):
         p = e.position()
@@ -563,14 +562,22 @@ class Viewport(QOpenGLWidget):
         alt = bool(mods & Qt.AltModifier)
         # Drag-to-extrude takes priority: if a face is being dragged, ignore orbit/pan
         if self._extrude_state is not None:
-            # Project cursor onto the face plane, measure along normal
-            w, h = self.width(), self.height()
-            o, rd = self.camera.ray(p.x(), p.y(), w, h)
+            # Screen-space drag: project cursor movement onto the face normal's
+            # screen projection, then convert px to world units at the face depth.
+            # (Projecting the cursor ray onto the plane reads ~0 in an ortho view,
+            # where the ray offset is parallel to the image plane.)
             c, n = self._extrude_state["center"], self._extrude_state["normal"]
-            proj = ray_plane(o, rd, c, n)
-            if proj is not None:
-                self._extrude_dist = float(np.dot(proj - c, n))
-            self._update_extrude_preview()
+            r, u, b = self.camera.right, self.camera.up, self.camera.back
+            nx, ny = float(n @ r), float(n @ u)  # normal in screen space
+            p0 = self._extrude_state["start_screen"]
+            dx, dy = float(p.x() - p0[0]), float(p0[1] - p.y())  # screen y up
+            d_px = dx * nx + dy * ny
+            if abs(d_px) < 1e-9:
+                self._extrude_dist = 0.0  # face edge-on: no depth component
+            else:
+                depth = max(1.0, abs(float(np.dot(c - self.camera.eye, b))))
+                px_per_world = self.height() / (2.0 * depth * FOV_TAN)
+                self._extrude_dist = d_px / px_per_world
         elif btn == Qt.RightButton or (btn == Qt.LeftButton and (self.left_orbits or alt or self._cube_press)
                                      and not mods & Qt.ShiftModifier):
             self.camera.orbit(-d.x() * 0.4, -d.y() * 0.4)
@@ -594,7 +601,6 @@ class Viewport(QOpenGLWidget):
                                     tuple(map(float, c)), tuple(map(float, n)))
             self._extrude_state = None
             self._extrude_dist = 0.0
-            self._extrude_preview = None
             self.update()
         self._press = None
         self._cube_press = False
