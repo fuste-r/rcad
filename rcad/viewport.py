@@ -22,6 +22,7 @@ class Viewport(QOpenGLWidget):
     hovered = Signal(float, float)
     scrolled = Signal(float, float, int, object)  # x, y, angle delta, Qt.KeyboardModifier
     extrude_commit = Signal(float, tuple, tuple)  # distance_mm, center, normal
+    sketch_mouse = Signal(str, float, float)  # phase ("press"|"move"|"release"), x, y
 
     def __init__(self):
         super().__init__()
@@ -538,6 +539,11 @@ class Viewport(QOpenGLWidget):
                                            "start_screen": (p.x(), p.y()),
                                            "outline": self._face_outline(face)}
                     self._extrude_dist = 0.0
+        # Sketch drag: report a plain left press in sketch mode to the app
+        if (e.button() == Qt.LeftButton and not self._cube_press
+                and self.sketch is not None
+                and not (e.modifiers() & (Qt.AltModifier | Qt.ShiftModifier))):
+            self.sketch_mouse.emit("press", p.x(), p.y())
 
     def mouseMoveEvent(self, e):
         p = e.position()
@@ -558,6 +564,12 @@ class Viewport(QOpenGLWidget):
             self._dragged = True
         self._last = p
         if not self._dragged:
+            return
+        # Sketch drag: report a plain left drag in sketch mode to the app.
+        # Takes priority over orbit/pan so a left drag moves geometry, not the camera.
+        if (btn == Qt.LeftButton and self.sketch is not None
+                and not (mods & (Qt.AltModifier | Qt.ShiftModifier))):
+            self.sketch_mouse.emit("move", p.x(), p.y())
             return
         alt = bool(mods & Qt.AltModifier)
         # Drag-to-extrude takes priority: if a face is being dragged, ignore orbit/pan
@@ -602,6 +614,11 @@ class Viewport(QOpenGLWidget):
             self._extrude_state = None
             self._extrude_dist = 0.0
             self.update()
+        # Commit sketch drag
+        if (self._press is not None and self._dragged and self._press[1] == Qt.LeftButton
+                and self.sketch is not None
+                and not (self._press[2] & (Qt.AltModifier | Qt.ShiftModifier))):
+            self.sketch_mouse.emit("release", e.position().x(), e.position().y())
         self._press = None
         self._cube_press = False
 

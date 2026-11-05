@@ -157,6 +157,11 @@ class MainWindow(QMainWindow):
         self.pending = None  # first click of a two-click tool
         self.hover_region = None  # (sketch feature index, region index) under the cursor
         self.region_sketch = -1  # sketch whose regions were highlighted last
+        # Sketch-drag state, driven by Viewport.sketch_mouse (left-button drag in sketch mode)
+        self._sketch_press_uv = None    # (u, v) cursor position at the drag press
+        self._sketch_press_hit = None   # (kind, index) of the geometry under the cursor at press
+        self._sketch_drag_orig = None  # {point_index: [u, v]} restored if the post-drag solve fails
+        self._sketch_drag_active = False
 
         self.view = Viewport()
         self.setCentralWidget(self.view)
@@ -164,6 +169,7 @@ class MainWindow(QMainWindow):
         self.view.hovered.connect(self.on_hover)
         self.view.scrolled.connect(self.on_wheel_adjust)
         self.view.extrude_commit.connect(self.on_extrude_commit)
+        self.view.sketch_mouse.connect(self.on_sketch_mouse)
 
         self.features = QListWidget()
         self.features.itemDoubleClicked.connect(self.edit_feature)
@@ -583,7 +589,95 @@ class MainWindow(QMainWindow):
                 f.sketch.selection = []
         self._mirror_axis = None
         self._mirroring = False
+        # A held drag is reverted to the pre-drag positions before re-solving
+        if self._sketch_drag_active and self._sketch_drag_orig is not None:
+            for pi, (u, v) in self._sketch_drag_orig.items():
+                self.sketch.points[pi] = [u, v]
+            self._sketch_drag_active = False
+            self._sketch_press_uv = None
+            self._sketch_press_hit = None
+            self._sketch_drag_orig = None
+            self._solve_sketch()
         self._update_regions()
+
+    # -- sketch drag
+    def on_sketch_mouse(self, phase, x, y):
+        """Left-button drag on sketch geometry (points, lines, circles).
+
+        phase is "press" (track the geometry under the cursor), "move" (apply the
+        cursor delta directly so the view updates live), or "release" (solve and
+        either keep the move or revert it if the solve fails)."""
+        if phase == "press":
+            if self.tool == "select" and self.sketch is not None:
+                self._sketch_press_uv = self.view.sketch_uv(x, y)
+                self._sketch_press_hit = self.view.pick_sketch(x, y)
+            else:
+                self._sketch_press_uv = None
+                self._sketch_press_hit = None
+            self._sketch_drag_active = False
+            self._sketch_drag_orig = None
+        elif phase == "move":
+            if not self._sketch_drag_active:
+                if self._sketch_press_hit is None or self._sketch_press_uv is None:
+                    return
+                kind, idx = self._sketch_press_hit
+                self._sketch_drag_active = True
+                self._sketch_drag_orig = self._collect_drag_points(kind, idx)
+                self._push_sketch_undo()  # snapshot so a failed solve can revert
+            cur_uv = self.view.sketch_uv(x, y)
+            if cur_uv is None or self._sketch_press_uv is None:
+                return
+            du = cur_uv[0] - self._sketch_press_uv[0]
+            dv = cur_uv[1] - self._sketch_press_uv[1]
+            sk = self.sketch
+            orig = self._sketch_drag_orig
+            if orig is not None:
+                for pi, (u, v) in orig.items():
+                    sk.points[pi] = [u + du, v + dv]
+            if self._sketch_press_hit is not None:
+                self.view.sketch_sel = {self._sketch_press_hit}  # highlight while dragging
+            self.view.update()
+        elif phase == "release":
+            if self._sketch_drag_active:
+                self._finish_sketch_drag()
+            self._sketch_drag_active = False
+            self._sketch_press_uv = None
+            self._sketch_press_hit = None
+            self._sketch_drag_orig = None
+
+    def _collect_drag_points(self, kind, idx):
+        """Indices of the sketch points that move with the dragged element."""
+        sk = self.sketch
+        if kind == "p":
+            return {idx: list(sk.points[idx])}
+        if kind == "l":
+            a, b = sk.lines[idx]
+            return {a: list(sk.points[a]), b: list(sk.points[b])}
+        if kind == "c":
+            center, _ = sk.circles[idx]
+            return {center: list(sk.points[center])}
+        return {}
+
+    def _finish_sketch_drag(self):
+        """Solve after a drag; revert to the pre-drag positions if the solve fails."""
+        sk = self.sketch
+        orig = self._sketch_drag_orig
+        if not sk.solve():
+            if orig is not None:
+                for pi, (u, v) in orig.items():
+                    sk.points[pi] = [u, v]
+            sk.solve()  # restores the known-good state
+            self.statusBar().showMessage("Drag rejected: sketch constraints unsatisfied.", 6000)
+        else:
+            sk.version += 1
+            hit = self._sketch_press_hit
+            if hit is not None:
+                kind, idx = hit
+                label = {"p": f"point {idx}", "l": f"line {idx}", "c": f"circle {idx}"}[kind]
+                self.statusBar().showMessage(f"Dragged {label}.", 2000)
+        self.refresh_constraints()
+        self._update_regions()
+        self.mark_dirty()
 
     def _snap(self, x, y):
         """-> (existing point index or None, (u, v)) for the cursor, or None if the ray misses the plane."""
