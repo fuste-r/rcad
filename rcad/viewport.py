@@ -23,6 +23,8 @@ class Viewport(QOpenGLWidget):
     scrolled = Signal(float, float, int, object)  # x, y, angle delta, Qt.KeyboardModifier
     extrude_commit = Signal(float, tuple, tuple)  # distance_mm, center, normal
     sketch_mouse = Signal(str, float, float)  # phase ("press"|"move"|"release"), x, y
+    fillet_commit = Signal(float, list)  # radius_mm, [edge midpoints]
+    fillet_preview = Signal(float, list)  # live radius_mm, [edge midpoints]
 
     def __init__(self):
         super().__init__()
@@ -61,6 +63,11 @@ class Viewport(QOpenGLWidget):
         self._extrude_label.setStyleSheet(
             "color: #ffffff; background: rgba(0,128,0,180); padding: 2px 6px; "
             "border-radius: 3px; font-weight: bold;")
+        self._fillet_state = None  # {"mids", "outward", "start_screen", "radius"}
+        self._fillet_label = QLabel(self)
+        self._fillet_label.setStyleSheet(
+            "color: #ffffff; background: rgba(128,0,128,180); padding: 2px 6px; "
+            "border-radius: 3px; font-weight: bold;")
 
     # -- data
     def set_mesh(self, mesh: MeshData | None):
@@ -94,6 +101,30 @@ class Viewport(QOpenGLWidget):
             self.camera.target = (lo + hi) / 2.0
             self.camera.dist = max(float(np.linalg.norm(hi - lo)) * 1.8, 20.0)
         self.update()
+
+    def _fillet_outward(self, edge_idx: int):
+        """World unit vector the fillet grows along (perpendicular to the edge, in its face).
+        Returns None if the edge's face can't be resolved."""
+        m = self.mesh
+        if m is None or not len(m.edges) or not (0 <= edge_idx < len(m.edges)):
+            return None
+        pts = m.edges[edge_idx].polyline
+        if len(pts) < 2:
+            return None
+        d = (pts[-1] - pts[0]).astype(float)
+        d = d / max(float(np.linalg.norm(d)), 1e-12)
+        mid = np.asarray(m.edges[edge_idx].mid, float)
+        w, h = self.width(), self.height()
+        s = self.camera.project(mid.reshape(1, 3), w, h)[0]
+        face = self.pick_face(float(s[0]), float(s[1]))
+        if face is None or m.faces[face].normal is None:
+            return None
+        n = np.asarray(m.faces[face].normal, float)
+        out = np.cross(d, n)
+        if float(np.linalg.norm(out)) < 1e-9:
+            out = np.cross(n, d)
+        out = out / max(float(np.linalg.norm(out)), 1e-12)
+        return out
 
     # -- picking
     def pick_face(self, x, y) -> int | None:
@@ -539,6 +570,22 @@ class Viewport(QOpenGLWidget):
                                            "start_screen": (p.x(), p.y()),
                                            "outline": self._face_outline(face)}
                     self._extrude_dist = 0.0
+        # Drag-to-fillet: left drag (no modifier keys) on a picked/selected edge.
+        # Takes priority over orbit, so a left drag on an edge fillets instead of rotating.
+        if (e.button() == Qt.LeftButton and not self._cube_press and self.sketch is None
+                and not (e.modifiers() & (Qt.AltModifier | Qt.ShiftModifier))
+                and self.mesh is not None and len(self.mesh.edges)):
+            edge = self.pick_edge(p.x(), p.y())
+            if edge is not None and (edge in self.sel_edges or not self.sel_edges):
+                sel = sorted(self.sel_edges) if self.sel_edges else [edge]
+                mids = [tuple(map(float, self.mesh.edges[i].mid)) for i in sel]
+                self._fillet_state = {
+                    "mids": mids,
+                    "outward": self._fillet_outward(sel[0]),
+                    "start_screen": (p.x(), p.y()),
+                    "radius": 0.0,
+                }
+                self._fillet_label.hide()
         # Sketch drag: report a plain left press in sketch mode to the app
         if (e.button() == Qt.LeftButton and not self._cube_press
                 and self.sketch is not None
@@ -590,12 +637,54 @@ class Viewport(QOpenGLWidget):
                 depth = max(1.0, abs(float(np.dot(c - self.camera.eye, b))))
                 px_per_world = self.height() / (2.0 * depth * FOV_TAN)
                 self._extrude_dist = d_px / px_per_world
+        elif self._fillet_state is not None:
+            # Screen-space drag: project cursor movement onto the edge's outward
+            # (perpendicular, in-face) screen projection; abs() so either side
+            # of the edge grows the radius. Convert px to world mm at the edge depth.
+            st = self._fillet_state
+            c = np.asarray(st["mids"][0], float)
+            out = st["outward"]
+            p0 = st["start_screen"]
+            dx, dy = float(p.x() - p0[0]), float(p0[1] - p.y())  # screen y up
+            if out is not None:
+                r, u = self.camera.right, self.camera.up
+                nx, ny = float(out @ r), float(out @ u)
+                d_px = abs(dx * nx + dy * ny)
+                depth = max(1.0, abs(float(np.dot(c - self.camera.eye, self.camera.back))))
+                px_per_world = self.height() / (2.0 * depth * FOV_TAN)
+            else:
+                # No resolved face normal: fall back to total screen drag distance.
+                d_px = float(np.hypot(dx, dy))
+                depth = max(1.0, abs(float(np.dot(c - self.camera.eye, self.camera.back))))
+                px_per_world = self.height() / (2.0 * depth * FOV_TAN)
+            if d_px < 1e-9:
+                st["radius"] = 0.0
+            else:
+                st["radius"] = d_px / px_per_world
+            self.fillet_preview.emit(st["radius"], st["mids"])
+            self._show_fillet_label(st)
         elif btn == Qt.RightButton or (btn == Qt.LeftButton and (self.left_orbits or alt or self._cube_press)
-                                     and not mods & Qt.ShiftModifier):
+                                      and not mods & Qt.ShiftModifier):
             self.camera.orbit(-d.x() * 0.4, -d.y() * 0.4)
         elif btn == Qt.MiddleButton or (btn == Qt.LeftButton and mods & Qt.ShiftModifier):
             self.camera.pan(d.x(), d.y(), self.height())
         self.update()
+
+    def _show_fillet_label(self, st):
+        """Place the live fillet-radius label near the first edge's outward point."""
+        radius = st["radius"]
+        if radius is None or abs(radius) < 1e-4:
+            self._fillet_label.hide()
+            return
+        c = np.asarray(st["mids"][0], float)
+        out = st["outward"]
+        tip = c + (radius * out if out is not None else np.zeros(3))
+        w, h = self.width(), self.height()
+        s = self.camera.project(tip.reshape(1, 3), w, h)[0]
+        x, y = float(s[0]), float(s[1])
+        self._fillet_label.setText(f"R {radius:.2f} mm")
+        self._fillet_label.move(int(x) + 10, max(int(y) - 12, 2))
+        self._fillet_label.show()
 
     def mouseReleaseEvent(self, e):
         if self._press is not None and not self._dragged:
@@ -613,6 +702,14 @@ class Viewport(QOpenGLWidget):
                                     tuple(map(float, c)), tuple(map(float, n)))
             self._extrude_state = None
             self._extrude_dist = 0.0
+            self.update()
+        # Commit drag-to-fillet
+        if self._fillet_state is not None:
+            st = self._fillet_state
+            if self._dragged and st["radius"] > 1e-4:
+                self.fillet_commit.emit(st["radius"], st["mids"])
+            self._fillet_state = None
+            self._fillet_label.hide()
             self.update()
         # Commit sketch drag
         if (self._press is not None and self._dragged and self._press[1] == Qt.LeftButton

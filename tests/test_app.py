@@ -116,6 +116,124 @@ def test_full_workflow(qapp, monkeypatch, tmp_path):
     assert [f.kind for f in w.doc.features][:1] != ["extrude"]
 
 
+def test_drag_fillet_preview_commit(qapp, monkeypatch):
+    w = MainWindow()
+    w.view.resize(1000, 700)
+    w.new_sketch()
+    w.set_tool("rect")
+    click(w, (0, 0, 0))
+    click(w, (40, 30, 0))
+    w.finish_sketch()
+    monkeypatch.setattr(appmod.ExtrudeDialog, "exec", lambda self: True)
+    w.extrude()
+    assert not w.doc.errors
+    vol0 = w.doc.part.volume
+
+    # a picked edge midpoint to fillet
+    edge = w.doc.mesh.edges[0]
+    mids = [tuple(edge.mid)]
+
+    # start a live fillet preview (viewport would emit this on drag)
+    w.on_fillet_preview(2.0, mids)
+    assert w.doc.features[-1].kind == "fillet"
+    assert w.doc.part is not None and w.doc.part.volume < vol0
+    assert not w.doc.errors
+
+    # dragging to a slightly larger radius updates the same temp feature
+    w.on_fillet_preview(2.5, mids)
+    assert w.doc.features[-1].kind == "fillet"
+    assert w.doc.features[-1].value == pytest.approx(2.5)
+
+    # release commits the fillet at the final radius
+    w.on_fillet_commit(2.5, mids)
+    assert w._fillet_live_idx is None
+    assert w.doc.features[-1].kind == "fillet"
+    assert w.doc.features[-1].value == pytest.approx(2.5)
+    assert not w.doc.errors
+    assert w.doc.part.volume < vol0
+
+    # cancel path: preview then release with ~0 radius rolls the model back
+    edge = w.doc.mesh.edges[0]
+    mids = [tuple(edge.mid)]
+    vol_before_cancel = w.doc.part.volume
+    w.on_fillet_preview(1.0, mids)
+    assert w.doc.part.volume != vol_before_cancel
+    w.on_fillet_commit(0.0, mids)
+    assert w._fillet_live_idx is None
+    assert not w.doc.errors
+    assert w.doc.part.volume == pytest.approx(vol_before_cancel)
+
+    # failing fillet (radius too large) on release also rolls back
+    w.on_fillet_preview(999.0, mids)
+    assert w.doc.errors  # the too-large fillet failed
+    w.on_fillet_commit(999.0, mids)
+    assert w._fillet_live_idx is None
+    assert not w.doc.errors
+    assert w.doc.part.volume == pytest.approx(vol_before_cancel)
+
+
+def test_drag_fillet_edit_existing(qapp, monkeypatch):
+    """Dragging an existing fillet's rounded edge edits its radius in place."""
+    w = MainWindow()
+    w.view.resize(1000, 700)
+    w.new_sketch()
+    w.set_tool("rect")
+    click(w, (0, 0, 0))
+    click(w, (40, 30, 0))
+    w.finish_sketch()
+    monkeypatch.setattr(appmod.ExtrudeDialog, "exec", lambda self: True)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
+    w.extrude()
+    assert not w.doc.errors
+
+    edge = w.doc.mesh.edges[0]
+    mids = [tuple(edge.mid)]
+    vol0 = w.doc.part.volume
+
+    # create a fillet via drag (new)
+    w.on_fillet_preview(2.0, mids)
+    w.on_fillet_commit(2.0, mids)
+    fillet = w.doc.features[-1]
+    assert fillet.kind == "fillet"
+    assert fillet.value == pytest.approx(2.0)
+    assert not w.doc.errors
+    assert fillet.result_edges  # the rounded-edge mids are recorded
+    vol_fillet = w.doc.part.volume
+    assert vol_fillet < vol0
+
+    # select the rounded edge's mid (at radius 2.0) and drag it -> edits the same fillet
+    rmid = [tuple(fillet.result_edges[0])]
+    w.on_fillet_preview(3.0, rmid)
+    assert w._fillet_is_mod  # recognized as an edit, not a new fillet
+    assert w.doc.features[-1] is fillet  # same feature, edited in place
+    assert fillet.value == pytest.approx(3.0)
+    w.on_fillet_commit(3.0, rmid)
+    assert w._fillet_is_mod is False
+    assert fillet.value == pytest.approx(3.0)
+    assert not w.doc.errors
+    assert w.doc.part.volume != vol_fillet  # the radius change moved the shape
+    # refresh the rounded-edge mid (it moved with the radius)
+    rmid = [tuple(fillet.result_edges[0])]
+
+    # failing radius on release reverts to the pre-drag value
+    w.on_fillet_preview(999.0, rmid)
+    assert w.doc.errors  # the too-large fillet failed
+    w.on_fillet_commit(999.0, rmid)
+    assert not w.doc.errors
+    assert fillet.value == pytest.approx(3.0)  # reverted to pre-drag radius
+    rmid = [tuple(fillet.result_edges[0])]
+
+    # dragging to ~0 removes the fillet
+    vol_before_remove = w.doc.part.volume
+    w.on_fillet_preview(3.0, rmid)
+    assert w._fillet_is_mod
+    w.on_fillet_commit(0.0, rmid)
+    assert fillet not in w.doc.features  # the fillet is gone
+    assert not w.doc.errors
+    assert w.doc.part is not None  # the extrude is still live
+    assert w.doc.part.volume == pytest.approx(vol0)
+
+
 def test_layer_checkbox_toggles(qapp, monkeypatch):
     w = MainWindow()
     w.view.resize(1000, 700)

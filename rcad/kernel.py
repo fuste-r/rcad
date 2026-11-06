@@ -29,6 +29,7 @@ class Feature:
     auto: bool = False  # extrude: cut when the extrusion mostly lies inside the body, otherwise add
     resolved_cut: bool | None = field(default=None, compare=False, repr=False)  # last auto decision
     version: int = 0  # incremented on edit to enable shape caching
+    result_edges: list = field(default_factory=list, repr=False)  # fillet: mids of the rounded edges it created
 
     def label(self, unit: Unit = MM) -> str:
         if self.kind == "sketch":
@@ -45,7 +46,7 @@ class Feature:
     def to_dict(self) -> dict:
         d = {"kind": self.kind, "name": self.name, "sketch_ref": self.sketch_ref, "value": self.value,
              "cut": self.cut, "face": self.face, "edges": [list(e) for e in self.edges], "visible": self.visible,
-             "profiles": self.profiles, "auto": self.auto}
+             "profiles": self.profiles, "auto": self.auto, "result_edges": [list(e) for e in self.result_edges]}
         if self.sketch:
             d["sketch"] = self.sketch.to_dict()
         return d
@@ -58,7 +59,7 @@ class Feature:
                        d.get("sketch_ref", -1), d.get("value", 0.0), d.get("cut", False),
                        tuple(map(tuple, d["face"])) if d.get("face") else None,
                        [tuple(e) for e in d.get("edges", [])], d.get("visible", True), d.get("profiles"),
-                       d.get("auto", False))
+                       d.get("auto", False), result_edges=[tuple(e) for e in d.get("result_edges", [])])
 
 
 @dataclass

@@ -171,6 +171,8 @@ class MainWindow(QMainWindow):
         self.view.hovered.connect(self.on_hover)
         self.view.scrolled.connect(self.on_wheel_adjust)
         self.view.extrude_commit.connect(self.on_extrude_commit)
+        self.view.fillet_commit.connect(self.on_fillet_commit)
+        self.view.fillet_preview.connect(self.on_fillet_preview)
         self.view.sketch_mouse.connect(self.on_sketch_mouse)
 
         self.features = QListWidget()
@@ -200,6 +202,10 @@ class MainWindow(QMainWindow):
         self._sketch_undo: list[tuple[int, dict]] = []
         self._sketch_redo: list[tuple[int, dict]] = []
         self._sketch_restoring = False
+        self._fillet_live_idx = None
+        self._fillet_preview_r = None
+        self._fillet_is_mod = False  # current drag edits an existing fillet
+        self._fillet_mod_prev = None  # fillet radius before the modify drag
         QShortcut(QKeySequence(Qt.Key_Escape), self, self.cancel)
         self.resize(1300, 800)
         self.set_mode("model")
@@ -1251,6 +1257,123 @@ class MainWindow(QMainWindow):
         if abs(dist) < 0.01:
             return
         self.commit(Feature("pushpull", value=dist, face=(center, normal)))
+
+    def _fillet_result_edges(self, f: Feature) -> list:
+        """Mids of the curve edges in the current mesh — fillet results.
+
+        A fillet rounds the picked edge's end(s) into real curve geometry in the
+        rebuilt mesh.  Every curve edge (``len(polyline) > 2``) present after the
+        operation is a fillet result; line edges have exactly two points.  These
+        mids let a later drag map a selected rounded edge back to its fillet
+        feature (drag-to-edit existing fillets).
+        """
+        if f.kind != "fillet" or self.doc.mesh is None:
+            return []
+        return [tuple(map(float, e.mid)) for e in self.doc.mesh.edges
+                if len(e.polyline) > 2]
+
+    def _find_fillet_by_edge(self, mid: tuple) -> int | None:
+        """Index of the fillet feature whose rounded edges contain `mid`, else None."""
+        m = np.asarray(mid, float)
+        best, best_d = None, 1e-4  # require an exact-ish match (within ~0.1mm)
+        for i, f in enumerate(self.doc.features):
+            if f.kind != "fillet" or not f.result_edges:
+                continue
+            for re in f.result_edges:
+                d = float(np.linalg.norm(np.asarray(re, float) - m))
+                if d < best_d:
+                    best, best_d = i, d
+        return best
+
+    def on_fillet_commit(self, radius: float, mids: list):
+        """Finalize a drag: commit a new fillet, or edit an existing fillet's radius.
+
+        - New fillet: the live temp feature is finalized in place; if the fillet
+          is still failing at release the temp feature is rolled back so the model
+          returns to the pre-drag state.
+        - Edit (existing fillet): the feature's radius is changed in place; if the
+          new radius makes the fillet fail the radius is reverted to its pre-drag
+          value; dragging to ~0 removes the fillet.
+        """
+        mids = [tuple(map(float, m)) for m in mids]
+        if self._fillet_live_idx is not None:
+            idx = self._fillet_live_idx
+            f = self.doc.features[idx]
+            if self._fillet_is_mod:
+                if radius > 1e-4:
+                    f.value = float(radius)
+                    f.version += 1
+                    self.rebuild()
+                    if idx in self.doc.errors:
+                        # New radius invalid: revert to the pre-drag radius.
+                        f.value = float(self._fillet_mod_prev or f.value)
+                        f.version += 1
+                        self.rebuild()
+                        f.result_edges = self._fillet_result_edges(f)
+                        QMessageBox.warning(self, "Edit fillet", "Radius reverted (the fillet failed at the new size).")
+                    else:
+                        f.result_edges = self._fillet_result_edges(f)
+                else:
+                    # Dragged to ~0: remove the fillet.
+                    self.doc.features.pop(idx)
+                    self.rebuild()
+            else:
+                if radius > 1e-4:
+                    f.value = float(radius)
+                    f.version += 1
+                    self.rebuild()
+                    if idx in self.doc.errors:
+                        self.doc.features.pop(idx)
+                        self.rebuild()
+                    else:
+                        f.result_edges = self._fillet_result_edges(f)
+                else:
+                    self.doc.features.pop(idx)
+                    self.rebuild()
+            self._fillet_live_idx = None
+            self._fillet_preview_r = None
+            self._fillet_is_mod = False
+            self._fillet_mod_prev = None
+            return
+        if radius > 1e-4:
+            feature = Feature("fillet", value=float(radius), edges=mids)
+            if self.commit(feature):
+                feature.result_edges = self._fillet_result_edges(feature)
+
+    def on_fillet_preview(self, radius: float, mids: list):
+        """Live fillet: keep the feature in the history while dragging.
+
+        The first move decides whether the drag edits an existing fillet (the
+        selected edge's mid matches a fillet feature's result_edges) or creates
+        a new one.  Either way the radius is changed in place and the model is
+        rebuilt (throttled to >= 0.05mm).  Editing also refreshes the fillet's
+        result_edges so the next drag can find it again.
+        """
+        mids = [tuple(map(float, m)) for m in mids]
+        if self._fillet_live_idx is None:
+            self._push_undo()  # remember the pre-drag history
+            mod_idx = self._find_fillet_by_edge(mids[0])
+            if mod_idx is not None:
+                self._fillet_live_idx = mod_idx
+                self._fillet_is_mod = True
+                self._fillet_mod_prev = self.doc.features[mod_idx].value
+            else:
+                self.doc.features.append(Feature("fillet", value=float(radius), edges=mids))
+                self._fillet_live_idx = len(self.doc.features) - 1
+            self._fillet_preview_r = None
+        elif self._fillet_preview_r is not None and abs(radius - self._fillet_preview_r) < 0.05:
+            return  # not worth a rebuild this frame
+        f = self.doc.features[self._fillet_live_idx]
+        f.value = float(radius)
+        f.version += 1
+        sel_edges = set(self.view.sel_edges)
+        sel_faces = set(self.view.sel_faces)
+        self.rebuild()  # runs the kernel + refresh (clears selection); re-apply it
+        self.view.sel_edges = sel_edges
+        self.view.sel_faces = sel_faces
+        if self._fillet_is_mod:
+            f.result_edges = self._fillet_result_edges(f)
+        self._fillet_preview_r = radius
 
     def _edge_feature(self, kind):
         if not self.view.sel_edges:
