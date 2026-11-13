@@ -69,6 +69,40 @@ class ExtrudeDialog(QDialog):
         return self.mode.currentIndex() == 2
 
 
+class RevolveDialog(QDialog):
+    def __init__(self, parent, angle=360.0, axis="v", cut=False):
+        super().__init__(parent)
+        self.setWindowTitle("Revolve")
+        self.angle = QDoubleSpinBox()
+        self.angle.setRange(1.0, 360.0)
+        self.angle.setDecimals(1)
+        self.angle.setSuffix(" deg")
+        self.angle.setValue(angle)
+        self.axis = QComboBox()
+        self.axis.addItem("Sketch U axis", "u")
+        self.axis.addItem("Sketch V axis", "v")
+        self.axis.setCurrentIndex(0 if axis == "u" else 1)
+        self.mode = QComboBox()
+        self.mode.addItems(["Add (join)", "Cut (subtract)"])
+        self.mode.setCurrentIndex(1 if cut else 0)
+        form = QFormLayout(self)
+        form.addRow("Angle", self.angle)
+        form.addRow("Axis", self.axis)
+        form.addRow("Operation", self.mode)
+        box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        box.accepted.connect(self.accept)
+        box.rejected.connect(self.reject)
+        form.addRow(box)
+
+    @property
+    def axis_name(self) -> str:
+        return self.axis.currentData()
+
+    @property
+    def cut(self) -> bool:
+        return self.mode.currentIndex() == 1
+
+
 class ExpressionDialog(QDialog):
     def __init__(self, parent, text: str = ""):
         super().__init__(parent)
@@ -272,6 +306,7 @@ class MainWindow(QMainWindow):
         for text, slot, tip in [
             ("✏️", self.new_sketch, "Start a sketch on the chosen plane or the selected planar face"),
             ("⇈", self.extrude, "Extrude the selected (or last) sketch"),
+            ("⟳", self.revolve, "Revolve the selected (or last) sketch"),
             ("↕️", self.pushpull, "Move the selected planar face along its normal"),
             ("◐", self.fillet, "Round the selected edges"),
             ("◺", self.chamfer, "Bevel the selected edges"),
@@ -1240,6 +1275,24 @@ class MainWindow(QMainWindow):
             self.commit(Feature("extrude", sketch_ref=i, value=dlg.distance_mm, cut=dlg.cut, auto=dlg.auto,
                                 profiles=profiles))
 
+    def revolve(self):
+        i = self._sketch_for_extrude()
+        if i is None:
+            QMessageBox.information(self, "Revolve", "Create a sketch with a closed profile first.")
+            return
+        sketch = self.doc.features[i].sketch
+        if len(sketch.regions()) > 1 and not sketch.selected_regions():
+            self.enter_sketch(i)
+            self.statusBar().showMessage("Click the regions to revolve (Ctrl+click for several), then finish the sketch.",
+                                         12000)
+            return
+        chosen = sorted(sketch.selected_regions())
+        profiles = [list(next(p for p in sketch.selection if sketch.region_at(*p) == r)) for r in chosen] or None
+        dialog = RevolveDialog(self)
+        if dialog.exec():
+            self.commit(Feature("revolve", sketch_ref=i, value=dialog.angle.value(), cut=dialog.cut,
+                                profiles=profiles, axis=dialog.axis_name))
+
     def pushpull(self):
         if len(self.view.sel_faces) != 1:
             QMessageBox.information(self, "↕️", "Select exactly one planar face.")
@@ -1458,6 +1511,20 @@ class MainWindow(QMainWindow):
             if not dlg.exec():
                 return
             new = (dlg.distance_mm, dlg.cut, dlg.auto)
+        elif f.kind == "revolve":
+            dlg = RevolveDialog(self, f.value, f.axis, f.cut)
+            if not dlg.exec():
+                return
+            old = (f.value, f.axis, f.cut)
+            f.value, f.axis, f.cut = dlg.angle.value(), dlg.axis_name, dlg.cut
+            f.version += 1
+            self.rebuild()
+            if i in self.doc.errors:
+                QMessageBox.warning(self, "Operation failed", self.doc.errors[i])
+                f.value, f.axis, f.cut = old
+                f.version += 1
+                self.rebuild()
+            return
         else:
             v, ok = self.ask_length(f.kind.title(), "Value", f.value, -1e5, 1e5)
             if not ok or v == 0:

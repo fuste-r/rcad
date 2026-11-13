@@ -4,7 +4,7 @@ A small parametric 3D CAD app for Linux, built on [build123d](https://github.com
 
 - Sketch on the XY/XZ/YZ planes or on any planar face (line, rectangle, circle)
 - Geometric and dimensional constraints solved by libslvs
-- Extrude (add or cut), face push/pull, fillet, chamfer
+- Extrude and revolve (add or cut), face push/pull, fillet, chamfer
 - Feature history that rebuilds on edit; save/load `.rcad` projects (JSON); export STEP and STL
 
 ## Install
@@ -44,7 +44,7 @@ On Wayland with NVIDIA, if the OpenGL context fails to create, try `QT_QPA_PLATF
 | Multi-select | Ctrl + click |
 | Cancel / clear selection | Esc |
 
-Workflow: choose a plane (or select a face and choose "Selected face"), **New Sketch**, draw, add constraints, **Finish Sketch**, then **Extrude**. Select a face for **Push/Pull**, or edges for **Fillet**/**Chamfer**. Double-click a feature to edit it.
+Workflow: choose a plane (or select a face and choose "Selected face"), **New Sketch**, draw, add constraints, **Finish Sketch**, then **Extrude** or **Revolve**. Revolve uses the sketch U or V axis. Select a face for **Push/Pull**, or edges for **Fillet**/**Chamfer**. Double-click a feature to edit it.
 
 ## Limitations
 

@@ -5,13 +5,13 @@ import json
 from dataclasses import dataclass, field
 
 import numpy as np
-from build123d import GeomType, Shape, Solid, Vector, export_step, export_stl
+from build123d import Axis, GeomType, Shape, Solid, Vector, export_step, export_stl
 
 from .sketch import Sketch
 from .units import MM, UNITS, Unit
 
 FORMAT_VERSION = 1
-KINDS = ("sketch", "extrude", "pushpull", "fillet", "chamfer")
+KINDS = ("sketch", "extrude", "revolve", "pushpull", "fillet", "chamfer")
 
 
 @dataclass
@@ -31,6 +31,7 @@ class Feature:
     version: int = 0  # incremented on edit to enable shape caching
     result_edges: list = field(default_factory=list, repr=False)  # fillet: mids of the rounded edges it created
     edge_dirs: list = field(default_factory=list, repr=False)  # fillet: unit direction of each picked edge (pre-fillet mesh)
+    axis: str = "v"  # revolve: sketch-local axis, "u" or "v"
 
     def label(self, unit: Unit = MM) -> str:
         if self.kind == "sketch":
@@ -40,6 +41,10 @@ class Feature:
             cut = self.resolved_cut if self.auto and self.resolved_cut is not None else self.cut
             mode = " auto" if self.auto else ""
             return f"{'Cut' if cut else 'Extrude'}{mode} ({unit.fmt(self.value)}{part}) of #{self.sketch_ref}"
+        if self.kind == "revolve":
+            mode = "Cut" if self.cut else "Revolve"
+            part = f", {len(self.profiles)} region(s)" if self.profiles is not None else ""
+            return f"{mode} ({self.value:g} deg, {self.axis.upper()} axis{part}) of #{self.sketch_ref}"
         if self.kind == "pushpull":
             return f"Push/Pull {'+' if self.value >= 0 else '-'}{unit.fmt(abs(self.value))}"
         return f"{self.kind.title()} {unit.fmt(self.value)} x{len(self.edges)}"
@@ -48,6 +53,7 @@ class Feature:
         d = {"kind": self.kind, "name": self.name, "sketch_ref": self.sketch_ref, "value": self.value,
              "cut": self.cut, "face": self.face, "edges": [list(e) for e in self.edges], "visible": self.visible,
              "profiles": self.profiles,             "auto": self.auto, "result_edges": [list(e) for e in self.result_edges],
+             "axis": self.axis,
              "edge_dirs": [list(d) for d in self.edge_dirs]}
         if self.sketch:
             d["sketch"] = self.sketch.to_dict()
@@ -62,7 +68,7 @@ class Feature:
                        tuple(map(tuple, d["face"])) if d.get("face") else None,
                        [tuple(e) for e in d.get("edges", [])], d.get("visible", True), d.get("profiles"),
                        d.get("auto", False), result_edges=[tuple(e) for e in d.get("result_edges", [])],
-                       edge_dirs=[tuple(d) for d in d.get("edge_dirs", [])])
+                       edge_dirs=[tuple(d) for d in d.get("edge_dirs", [])], axis=d.get("axis", "v"))
 
 
 @dataclass
@@ -237,18 +243,37 @@ class Document:
     def _apply(self, part: Shape | None, f: Feature) -> Shape | None:
         if f.kind == "sketch" or not f.visible:
             return part
-        if f.kind == "extrude":
+        if f.kind in ("extrude", "revolve"):
             if not 0 <= f.sketch_ref < len(self.features) or self.features[f.sketch_ref].kind != "sketch":
-                raise ValueError("extrude has no valid sketch")
+                raise ValueError(f"{f.kind} has no valid sketch")
             sketch = self.features[f.sketch_ref].sketch
             sketch.variables = self.variables
-            solid = sketch.solid(f.value, f.profiles)
-            if solid is None:
-                raise ValueError("sketch has no matching closed region or distance is zero")
-            cut = f.cut
-            if f.auto:
-                cut = f.resolved_cut = part is not None and _mostly_inside(part, solid)
-            return self._combine(part, solid, cut)
+            if f.kind == "extrude":
+                solid = sketch.solid(f.value, f.profiles)
+                if solid is None:
+                    raise ValueError("sketch has no matching closed region or distance is zero")
+                cut = f.cut
+                if f.auto:
+                    cut = f.resolved_cut = part is not None and _mostly_inside(part, solid)
+                return self._combine(part, solid, cut)
+            if f.axis not in ("u", "v"):
+                raise ValueError("revolve axis must be sketch U or V")
+            if abs(f.value) < 1e-6 or abs(f.value) > 360:
+                raise ValueError("revolve angle must be between 0 and 360 degrees")
+            direction = sketch.plane.xdir if f.axis == "u" else sketch.plane.ydir
+            axis = Axis(sketch.plane.origin, direction)
+            regions = sketch.regions()
+            if f.profiles is not None:
+                selected = {i for p in f.profiles if (i := sketch.region_at(*p)) is not None}
+                regions = [region for i, region in enumerate(regions) if i in selected]
+            if not regions:
+                raise ValueError("sketch has no matching closed region")
+            solid = None
+            for region in regions:
+                face = sketch.plane.b123d().from_local_coords(sketch._region_face(region))
+                revolved = Solid.revolve(face, f.value, axis)
+                solid = revolved if solid is None else solid.fuse(revolved).clean()
+            return self._combine(part, solid, f.cut)
         if f.kind == "pushpull":
             if part is None:
                 raise ValueError("nothing to push/pull")

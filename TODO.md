@@ -21,7 +21,8 @@
 
 ## P1: Modeling
 
-- [ ] Add a revolve feature using a sketch profile and selectable axis, followed by sweep and loft. Cover add/cut modes, rebuilds, and project-file round trips.
+- [x] Add a revolve feature using a sketch profile and selectable axis. Cover add/cut modes, rebuilds, and project-file round trips.
+- [ ] Add sweep and loft features with selectable paths/sections, add/cut modes, rebuilds, and project-file round trips.
 - [ ] Add shell, offset-face, and thicken operations with clear limits for unsupported OpenCascade cases.
 - [ ] Add explicit boolean intersection and improve body-aware union/subtract workflows. Keep disconnected solids independently selectable and editable.
 - [ ] Add construction planes and axes, then parametric move/rotate/mirror/pattern/split-body features.

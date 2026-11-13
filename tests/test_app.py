@@ -116,6 +116,41 @@ def test_full_workflow(qapp, monkeypatch, tmp_path):
     assert [f.kind for f in w.doc.features][:1] != ["extrude"]
 
 
+def test_revolve_workflow_and_edit(qapp, monkeypatch):
+    w = MainWindow()
+    w.plane_combo.setCurrentText("XZ")
+    w.new_sketch()
+    w.sketch.add_rect(10, 0, 20, 30)
+    w.sketch.solve()
+    w.finish_sketch()
+    class AcceptedRevolveDialog:
+        angle_value = 360.0
+
+        def __init__(self, *args, **kwargs):
+            self.angle = type("Angle", (), {"value": lambda _: self.angle_value})()
+            self.axis_name = "u"
+            self.cut = False
+
+        def exec(self):
+            return True
+
+    monkeypatch.setattr(appmod, "RevolveDialog", AcceptedRevolveDialog)
+
+    w.revolve()
+    feature = w.doc.features[-1]
+    expected = np.pi * (20**2 - 10**2) * 30
+    assert feature.kind == "revolve"
+    assert feature.axis == "u"
+    assert not w.doc.errors, w.doc.errors
+    assert w.doc.part.volume == pytest.approx(expected, rel=1e-6)
+
+    feature_item = w.features.item(w.features.count() - 1)
+    AcceptedRevolveDialog.angle_value = 180.0
+    w.edit_feature(feature_item)
+    assert feature.value == pytest.approx(180.0)
+    assert w.doc.part.volume == pytest.approx(expected / 2, rel=1e-6)
+
+
 def test_drag_fillet_preview_commit(qapp, monkeypatch):
     w = MainWindow()
     w.view.resize(1000, 700)

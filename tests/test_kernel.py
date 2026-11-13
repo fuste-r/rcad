@@ -47,6 +47,47 @@ def test_extrude_with_hole_and_features():
     assert doc.mesh.faces and doc.mesh.edges
 
 
+@pytest.mark.parametrize(("angle", "fraction", "axis"),
+                         [(360.0, 1.0, "v"), (180.0, 0.5, "v"), (360.0, 1.0, "u")])
+def test_revolve_profile_roundtrip(tmp_path, angle, fraction, axis):
+    sk = Sketch(standard_plane("XZ"))
+    sk.add_rect(10, 0, 20, 30)
+    doc = Document([Feature("sketch", "S1", sketch=sk),
+                    Feature("revolve", sketch_ref=0, value=angle, axis=axis)])
+
+    doc.rebuild()
+    assert not doc.errors, doc.errors
+    expected = np.pi * (20**2 - 10**2) * 30 * fraction
+    assert doc.part.volume == pytest.approx(expected, rel=1e-6)
+
+    path = str(tmp_path / "revolve.rcad")
+    doc.save(path)
+    loaded = Document.load(path)
+    assert not loaded.errors, loaded.errors
+    assert loaded.features[-1].kind == "revolve"
+    assert loaded.features[-1].axis == axis
+    assert loaded.part.volume == pytest.approx(expected, rel=1e-6)
+
+
+def test_revolve_can_cut_existing_solid():
+    base = Sketch(standard_plane("XY"))
+    center = base.add_point(0, 0)
+    base.add_circle(center, 15)
+    cutter = Sketch(standard_plane("XZ"))
+    cutter.add_rect(5, 0, 10, 30)
+    doc = Document([
+        Feature("sketch", "Base", sketch=base),
+        Feature("extrude", sketch_ref=0, value=30),
+        Feature("sketch", "Cutter", sketch=cutter),
+        Feature("revolve", sketch_ref=2, value=360, cut=True, axis="v"),
+    ])
+
+    doc.rebuild()
+    assert not doc.errors, doc.errors
+    expected = np.pi * 15**2 * 30 - np.pi * (10**2 - 5**2) * 30
+    assert doc.part.volume == pytest.approx(expected, rel=1e-6)
+
+
 def test_pushpull_fillet_chamfer_and_roundtrip(tmp_path):
     doc = Document([Feature("sketch", "S1", sketch=rect_sketch()), Feature("extrude", sketch_ref=0, value=10)])
     doc.rebuild()
