@@ -28,3 +28,7 @@ Thumbs.db
 !examples/**/*.step
 !examples/**/*.stp
 !examples/**/*.stl
+
+# Local working files
+model.rcad
+errors.txt

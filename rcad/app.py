@@ -517,6 +517,7 @@ class MainWindow(QMainWindow):
         self.doc.rebuild()
         self.mark_dirty()
         self.refresh()
+        self._refresh_fillet_result_edges()
         if self.doc.errors:
             i, msg = next(iter(self.doc.errors.items()))
             self.statusBar().showMessage(f"Feature {i} failed: {msg}", 8000)
@@ -1258,19 +1259,71 @@ class MainWindow(QMainWindow):
             return
         self.commit(Feature("pushpull", value=dist, face=(center, normal)))
 
-    def _fillet_result_edges(self, f: Feature) -> list:
-        """Mids of the curve edges in the current mesh — fillet results.
+    def _fillet_edge_dirs(self, mids: list) -> list:
+        """Unit direction of each picked edge, looked up in the pre-fillet mesh."""
+        mesh = self.doc.mesh
+        if mesh is None:
+            return []
+        dirs = []
+        for m in mids:
+            m_arr = np.asarray(m, float)
+            best_e, best_d = None, 1e-4  # edge mid within ~0.1mm is the picked edge
+            for e in mesh.edges:
+                d = float(np.linalg.norm(e.mid - m_arr))
+                if d < best_d:
+                    best_e, best_d = e, d
+            if best_e is None:
+                continue
+            p = np.asarray(best_e.polyline, float)
+            v = p[-1] - p[0]
+            n = float(np.linalg.norm(v))
+            if n > 1e-9:
+                dirs.append(tuple((v / n).tolist()))
+        return dirs
 
-        A fillet rounds the picked edge's end(s) into real curve geometry in the
-        rebuilt mesh.  Every curve edge (``len(polyline) > 2``) present after the
-        operation is a fillet result; line edges have exactly two points.  These
-        mids let a later drag map a selected rounded edge back to its fillet
-        feature (drag-to-edit existing fillets).
+    def _fillet_result_edges(self, f: Feature) -> list:
+        """Mids of the curve edges this fillet created in the current mesh.
+
+        A fillet rounds the picked edge into arc geometry: the midpoints of
+        those arcs sit a constant distance from the picked edge's original
+        line (r(√2-1) for a 90° edge, growing toward r on acute angles).
+        Matching each curve mid against every picked edge's line therefore
+        separates one fillet's arcs from another's, so a drag on a rounded
+        arc maps back to its own fillet feature.
         """
         if f.kind != "fillet" or self.doc.mesh is None:
             return []
-        return [tuple(map(float, e.mid)) for e in self.doc.mesh.edges
+        mids = [tuple(map(float, e.mid)) for e in self.doc.mesh.edges
                 if len(e.polyline) > 2]
+        if not f.edge_dirs:  # legacy feature (saved before edge_dirs existed)
+            return mids
+        res = []
+        for m in mids:
+            m_arr = np.asarray(m, float)
+            best = 1e30
+            for mid_e, dir_e in zip(f.edges, f.edge_dirs):
+                mid_arr = np.asarray(mid_e, float)
+                dir_arr = np.asarray(dir_e, float)
+                t = float(np.dot(m_arr - mid_arr, dir_arr))
+                d = float(np.linalg.norm((m_arr - mid_arr) - t * dir_arr))
+                if d < best:
+                    best = d
+            if best <= f.value + 1e-3:
+                res.append(m)
+        return res
+
+    def _refresh_fillet_result_edges(self):
+        """Refresh every fillet's ``result_edges`` from the current mesh.
+
+        Fillets are found by matching a grabbed edge mid against ``result_edges``.
+        Only the edited feature used to be refreshed, so after a second fillet
+        (or any rebuild) earlier fillets kept mids that no longer exist — and
+        a saved model kept them forever.  Re-derive for all fillets on every
+        rebuild and after load.
+        """
+        for f in self.doc.features:
+            if f.kind == "fillet":
+                f.result_edges = self._fillet_result_edges(f)
 
     def _find_fillet_by_edge(self, mid: tuple) -> int | None:
         """Index of the fillet feature whose rounded edges contain `mid`, else None."""
@@ -1336,7 +1389,8 @@ class MainWindow(QMainWindow):
             self._fillet_mod_prev = None
             return
         if radius > 1e-4:
-            feature = Feature("fillet", value=float(radius), edges=mids)
+            feature = Feature("fillet", value=float(radius), edges=mids,
+                              edge_dirs=self._fillet_edge_dirs(mids))
             if self.commit(feature):
                 feature.result_edges = self._fillet_result_edges(feature)
 
@@ -1358,7 +1412,8 @@ class MainWindow(QMainWindow):
                 self._fillet_is_mod = True
                 self._fillet_mod_prev = self.doc.features[mod_idx].value
             else:
-                self.doc.features.append(Feature("fillet", value=float(radius), edges=mids))
+                self.doc.features.append(Feature("fillet", value=float(radius), edges=mids,
+                                                 edge_dirs=self._fillet_edge_dirs(mids)))
                 self._fillet_live_idx = len(self.doc.features) - 1
             self._fillet_preview_r = None
         elif self._fillet_preview_r is not None and abs(radius - self._fillet_preview_r) < 0.05:
@@ -1382,7 +1437,8 @@ class MainWindow(QMainWindow):
         mids = [tuple(map(float, self.doc.mesh.edges[i].mid)) for i in sorted(self.view.sel_edges)]
         v, ok = self.ask_length(kind.title(), "Size", 1.0, 1e-4, 1e4)
         if ok:
-            self.commit(Feature(kind, value=v, edges=mids))
+            dirs = self._fillet_edge_dirs(mids) if kind == "fillet" else []
+            self.commit(Feature(kind, value=v, edges=mids, edge_dirs=dirs))
 
     def fillet(self):
         self._edge_feature("fillet")
@@ -1456,6 +1512,7 @@ class MainWindow(QMainWindow):
         self.mark_dirty(False)
         self._apply_units()
         self.view.frame_all()
+        self._refresh_fillet_result_edges()
 
     def file_new(self):
         if self._confirm_discard():

@@ -30,6 +30,7 @@ class Feature:
     resolved_cut: bool | None = field(default=None, compare=False, repr=False)  # last auto decision
     version: int = 0  # incremented on edit to enable shape caching
     result_edges: list = field(default_factory=list, repr=False)  # fillet: mids of the rounded edges it created
+    edge_dirs: list = field(default_factory=list, repr=False)  # fillet: unit direction of each picked edge (pre-fillet mesh)
 
     def label(self, unit: Unit = MM) -> str:
         if self.kind == "sketch":
@@ -46,7 +47,8 @@ class Feature:
     def to_dict(self) -> dict:
         d = {"kind": self.kind, "name": self.name, "sketch_ref": self.sketch_ref, "value": self.value,
              "cut": self.cut, "face": self.face, "edges": [list(e) for e in self.edges], "visible": self.visible,
-             "profiles": self.profiles, "auto": self.auto, "result_edges": [list(e) for e in self.result_edges]}
+             "profiles": self.profiles,             "auto": self.auto, "result_edges": [list(e) for e in self.result_edges],
+             "edge_dirs": [list(d) for d in self.edge_dirs]}
         if self.sketch:
             d["sketch"] = self.sketch.to_dict()
         return d
@@ -59,7 +61,8 @@ class Feature:
                        d.get("sketch_ref", -1), d.get("value", 0.0), d.get("cut", False),
                        tuple(map(tuple, d["face"])) if d.get("face") else None,
                        [tuple(e) for e in d.get("edges", [])], d.get("visible", True), d.get("profiles"),
-                       d.get("auto", False), result_edges=[tuple(e) for e in d.get("result_edges", [])])
+                       d.get("auto", False), result_edges=[tuple(e) for e in d.get("result_edges", [])],
+                       edge_dirs=[tuple(d) for d in d.get("edge_dirs", [])])
 
 
 @dataclass
@@ -149,6 +152,16 @@ def _find_edge(part: Shape, mid, tol=1e-3):
         if d < best_d:
             best, best_d = e, d
     return best
+
+
+def _is_seam(part: Shape, e) -> bool:
+    """True when the edge is a seam: both sides are the same (or parallel) surface,
+    e.g. the seam of an extruded cylinder — a fillet/chamfer cannot round it."""
+    faces = [f for f in part.faces() if e in f.edges()]
+    if len(faces) < 2:
+        return True
+    d = abs(float(np.dot(_vec(faces[0].normal_at()), _vec(faces[1].normal_at()))))
+    return d > 1 - 1e-6
 
 
 @dataclass
@@ -251,17 +264,22 @@ class Document:
             edges = [_find_edge(part, m) for m in f.edges]
             if not edges or any(e is None for e in edges):
                 raise ValueError("edge no longer exists")
+            corners = [e for e in edges if not _is_seam(part, e)]
+            if not corners:
+                raise ValueError("picked edge is a seam (same surface on both sides) — cannot be rounded")
             solids = part.solids()
             modified: list[Solid] = []
             for s in solids:
-                s_edges = [e for e in edges if e in s.edges()]
+                s_edges = [e for e in corners if e in s.edges()]
                 if not s_edges:
                     modified.append(s)
                 elif f.kind == "fillet":
                     modified.append(s.fillet(f.value, s_edges))
                 else:
                     modified.append(s.chamfer(f.value, None, s_edges))
-            return modified[0] if len(modified) == 1 else Solid(*modified).fuse().clean()
+            # Multi-solid parts (e.g. a disconnected model) keep every modified
+            # body; fuse into one Part rather than the old Solid(...) container.
+            return modified[0] if len(modified) == 1 else modified[0].fuse(*modified[1:]).clean()
         raise ValueError(f"unknown feature {f.kind}")
 
     @staticmethod

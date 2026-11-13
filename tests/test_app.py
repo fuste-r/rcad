@@ -234,6 +234,63 @@ def test_drag_fillet_edit_existing(qapp, monkeypatch):
     assert w.doc.part.volume == pytest.approx(vol0)
 
 
+def test_fillet_result_edges_stay_current_across_fillets(qapp, monkeypatch, tmp_path):
+    """Both fillets' result_edges must match the current mesh after the second,
+    including after save/reload — earlier fillets used to keep stale mids."""
+    w = MainWindow()
+    w.view.resize(1000, 700)
+    w.new_sketch()
+    w.set_tool("rect")
+    click(w, (0, 0, 0))
+    click(w, (40, 30, 0))
+    w.finish_sketch()
+    monkeypatch.setattr(appmod.ExtrudeDialog, "exec", lambda self: True)
+    w.extrude()
+    assert not w.doc.errors
+
+    mids0 = [tuple(w.doc.mesh.edges[0].mid)]
+    e1 = next(e for e in w.doc.mesh.edges
+              if float(np.linalg.norm(np.array(e.mid) - np.array(mids0[0]))) > 1.0)
+    mids1 = [tuple(e1.mid)]
+
+    # first fillet
+    w.on_fillet_preview(2.0, mids0)
+    w.on_fillet_commit(2.0, mids0)
+    f0 = w.doc.features[-1]
+    assert f0.kind == "fillet" and not w.doc.errors
+
+    # second fillet on a different edge (look it up by its original mid)
+    w.on_fillet_preview(2.0, mids1)
+    w.on_fillet_commit(2.0, mids1)
+    f1 = w.doc.features[-1]
+    assert f1.kind == "fillet" and f1 is not f0 and not w.doc.errors
+
+    curve = [tuple(map(float, e.mid)) for e in w.doc.mesh.edges if len(e.polyline) > 2]
+    assert len(curve) == 4
+
+    def covers(f):
+        return all(any(all(abs(a - b) < 1e-6 for a, b in zip(m, c)) for c in curve)
+                   for m in f.result_edges)
+
+    assert len(f0.result_edges) == 2 and covers(f0)
+    assert len(f1.result_edges) == 2 and covers(f1)
+    assert not (set(map(tuple, f0.result_edges)) & set(map(tuple, f1.result_edges)))
+
+    # reload: the stored sets must still match the rebuilt mesh
+    path = str(tmp_path / "proj.rcad")
+    w.path = path
+    w.file_save()
+    w2 = MainWindow()
+    w2._load(appmod.Document.load(path), path)
+    assert not w2.doc.errors
+    curve2 = [tuple(map(float, e.mid)) for e in w2.doc.mesh.edges if len(e.polyline) > 2]
+    assert len(curve2) == 4
+    for f in (f for f in w2.doc.features if f.kind == "fillet"):
+        assert len(f.result_edges) == 2
+        assert all(any(all(abs(a - b) < 1e-6 for a, b in zip(m, c)) for c in curve2)
+                   for m in f.result_edges)
+
+
 def test_layer_checkbox_toggles(qapp, monkeypatch):
     w = MainWindow()
     w.view.resize(1000, 700)

@@ -120,3 +120,40 @@ def test_layers_suppress_and_persist(tmp_path):
     path = str(tmp_path / "l.rcad")
     doc.save(path)
     assert [f.visible for f in Document.load(path).features] == [False, True, False]
+
+
+def test_fillet_seam_reports_and_skips():
+    """A cylinder seam (same surface on both sides) can't be rounded.
+
+    model.rcad is a box + disconnected cylinder; its cylinder seam edge is a
+    visible mesh edge that the fillet kernel must refuse (or skip when mixed
+    with real corners), never fail inside the geometry kernel.
+    """
+    sk = rect_sketch(20, 10)  # box 0..20 x 0..10
+    c = sk.add_point(30, 10)  # cylinder center (30, 10), r 5 -> seam at x=35
+    sk.add_circle(c, 5)
+    sk.constraints += [Constraint("fixed", [0]), Constraint("fixed", [c])]
+    assert sk.solve()
+    doc = Document([Feature("sketch", "S1", sketch=sk), Feature("extrude", sketch_ref=0, value=10)])
+    doc.rebuild()
+    assert not doc.errors
+    assert len(doc.part.solids()) == 2  # box + cylinder are disconnected
+    base = doc.part.volume
+    seam = [(35.0, 10.0, 5.0)]  # mid of the cylinder's vertical seam edge
+    doc.features.append(Feature("fillet", value=1.0, edges=seam))
+    doc.rebuild()
+    assert 2 in doc.errors
+    assert "seam" in doc.errors[2]
+
+    # seam + a real corner: the seam is skipped, the corner is rounded
+    doc.features[2].edges = seam + [(20.0, 5.0, 0.0)]
+    doc.rebuild()
+    assert not doc.errors, doc.errors
+    assert len(doc.part.solids()) == 2
+    assert base - doc.part.volume > 0
+
+    # both bodies filleted: every body must survive
+    doc.features[2].edges = [(20.0, 5.0, 0.0), (25.0, 10.0, 0.0)]  # box edge + cylinder rim (circle mid is opposite its seam)
+    doc.rebuild()
+    assert not doc.errors, doc.errors
+    assert len(doc.part.solids()) == 2
