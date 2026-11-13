@@ -9,6 +9,8 @@ from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox
 
 from rcad import app as appmod
 from rcad.app import MainWindow
+from rcad.kernel import Feature
+from rcad.sketch import Sketch, SketchPlane, standard_plane
 
 
 @pytest.fixture(scope="module")
@@ -149,6 +151,61 @@ def test_revolve_workflow_and_edit(qapp, monkeypatch):
     w.edit_feature(feature_item)
     assert feature.value == pytest.approx(180.0)
     assert w.doc.part.volume == pytest.approx(expected / 2, rel=1e-6)
+
+
+def test_sweep_and_loft_actions(qapp, monkeypatch):
+    profile = Sketch(standard_plane("XY"))
+    profile.add_rect(0, 0, 10, 4)
+    path = Sketch(standard_plane("XZ"))
+    path.points = [[0, 0], [0, 20]]
+    path.add_line(0, 1)
+    lower = Sketch(standard_plane("XY"))
+    lower.add_rect(-5, -5, 5, 5)
+    upper = Sketch(SketchPlane((0, 0, 10), (1, 0, 0), (0, 0, 1)))
+    upper.add_rect(-10, -10, 10, 10)
+
+    class AcceptedSweepDialog:
+        path_ref = 1
+        cut = False
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return True
+
+    class AcceptedLoftDialog:
+        section_refs = [0, 1]
+        cut = False
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return True
+
+    w = MainWindow()
+    w.doc.features = [Feature("sketch", "Profile", sketch=profile),
+                      Feature("sketch", "Path", sketch=path),
+                      Feature("sketch", "Lower", sketch=lower),
+                      Feature("sketch", "Upper", sketch=upper)]
+    w.doc.rebuild()
+    w.refresh()
+    w.features.setCurrentRow(0)
+    monkeypatch.setattr(appmod, "SweepDialog", AcceptedSweepDialog)
+    w.sweep()
+    assert w.doc.features[-1].kind == "sweep"
+    assert not w.doc.errors, w.doc.errors
+    assert w.doc.part.volume == pytest.approx(800.0, rel=1e-6)
+
+    w.doc.features = [w.doc.features[2], w.doc.features[3]]
+    w.doc.rebuild(0)
+    w.refresh()
+    monkeypatch.setattr(appmod, "LoftDialog", AcceptedLoftDialog)
+    w.loft()
+    assert w.doc.features[-1].kind == "loft"
+    assert not w.doc.errors, w.doc.errors
+    assert w.doc.part.volume == pytest.approx(10 / 3 * (100 + 200 + 400), rel=1e-6)
 
 
 def test_drag_fillet_preview_commit(qapp, monkeypatch):

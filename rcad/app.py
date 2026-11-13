@@ -7,7 +7,7 @@ import numpy as np
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut, QSurfaceFormat
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDockWidget, QDoubleSpinBox, QFileDialog,
+    QApplication, QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDockWidget, QDoubleSpinBox, QFileDialog,
     QFormLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
     QPushButton, QTextEdit,
     QToolBar, QWidget,
@@ -97,6 +97,70 @@ class RevolveDialog(QDialog):
     @property
     def axis_name(self) -> str:
         return self.axis.currentData()
+
+    @property
+    def cut(self) -> bool:
+        return self.mode.currentIndex() == 1
+
+
+class SweepDialog(QDialog):
+    def __init__(self, parent, paths, path_ref=None, cut=False):
+        super().__init__(parent)
+        self.setWindowTitle("Sweep")
+        self.path = QComboBox()
+        for index, name in paths:
+            self.path.addItem(name, index)
+        current = self.path.findData(path_ref)
+        if current >= 0:
+            self.path.setCurrentIndex(current)
+        self.mode = QComboBox()
+        self.mode.addItems(["Add (join)", "Cut (subtract)"])
+        self.mode.setCurrentIndex(1 if cut else 0)
+        form = QFormLayout(self)
+        form.addRow("Path sketch", self.path)
+        form.addRow("Operation", self.mode)
+        box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        box.accepted.connect(self.accept)
+        box.rejected.connect(self.reject)
+        form.addRow(box)
+
+    @property
+    def path_ref(self) -> int:
+        return int(self.path.currentData())
+
+    @property
+    def cut(self) -> bool:
+        return self.mode.currentIndex() == 1
+
+
+class LoftDialog(QDialog):
+    def __init__(self, parent, sections, section_refs=None, cut=False):
+        super().__init__(parent)
+        self.setWindowTitle("Loft")
+        self.sections = QListWidget()
+        self.sections.setSelectionMode(QAbstractItemView.MultiSelection)
+        selected = set(section_refs or [])
+        for index, name in sections:
+            item = QListWidgetItem(name)
+            item.setData(Qt.UserRole, index)
+            self.sections.addItem(item)
+            item.setSelected(index in selected)
+        self.mode = QComboBox()
+        self.mode.addItems(["Add (join)", "Cut (subtract)"])
+        self.mode.setCurrentIndex(1 if cut else 0)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.sections)
+        form = QFormLayout()
+        form.addRow("Operation", self.mode)
+        layout.addLayout(form)
+        box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        box.accepted.connect(self.accept)
+        box.rejected.connect(self.reject)
+        layout.addWidget(box)
+
+    @property
+    def section_refs(self) -> list[int]:
+        return [int(item.data(Qt.UserRole)) for item in self.sections.selectedItems()]
 
     @property
     def cut(self) -> bool:
@@ -307,6 +371,8 @@ class MainWindow(QMainWindow):
             ("✏️", self.new_sketch, "Start a sketch on the chosen plane or the selected planar face"),
             ("⇈", self.extrude, "Extrude the selected (or last) sketch"),
             ("⟳", self.revolve, "Revolve the selected (or last) sketch"),
+            ("↝", self.sweep, "Sweep a sketch profile along a sketch path"),
+            ("⌁", self.loft, "Loft between sketch sections"),
             ("↕️", self.pushpull, "Move the selected planar face along its normal"),
             ("◐", self.fillet, "Round the selected edges"),
             ("◺", self.chamfer, "Bevel the selected edges"),
@@ -1293,6 +1359,38 @@ class MainWindow(QMainWindow):
             self.commit(Feature("revolve", sketch_ref=i, value=dialog.angle.value(), cut=dialog.cut,
                                 profiles=profiles, axis=dialog.axis_name))
 
+    def sweep(self):
+        profile_ref = self._sketch_for_extrude()
+        if profile_ref is None:
+            QMessageBox.information(self, "Sweep", "Create a sketch with one closed profile first.")
+            return
+        profile = self.doc.features[profile_ref].sketch
+        if len(profile.regions()) != 1:
+            QMessageBox.information(self, "Sweep", "Sweep currently requires exactly one closed profile region.")
+            return
+        paths = [(i, f"{i}: {f.name}") for i, f in enumerate(self.doc.features)
+                 if f.kind == "sketch" and i != profile_ref and f.sketch.lines]
+        if not paths:
+            QMessageBox.information(self, "Sweep", "Create another sketch with connected path lines first.")
+            return
+        dialog = SweepDialog(self, paths)
+        if dialog.exec():
+            self.commit(Feature("sweep", sketch_ref=profile_ref, path_ref=dialog.path_ref, cut=dialog.cut))
+
+    def loft(self):
+        sections = [(i, f"{i}: {f.name}") for i, f in enumerate(self.doc.features)
+                    if f.kind == "sketch" and len(f.sketch.regions()) == 1]
+        if len(sections) < 2:
+            QMessageBox.information(self, "Loft", "Create at least two sketches with one closed profile each.")
+            return
+        dialog = LoftDialog(self, sections)
+        if dialog.exec():
+            refs = dialog.section_refs
+            if len(refs) < 2:
+                QMessageBox.information(self, "Loft", "Select at least two section sketches.")
+                return
+            self.commit(Feature("loft", section_refs=refs, cut=dialog.cut))
+
     def pushpull(self):
         if len(self.view.sel_faces) != 1:
             QMessageBox.information(self, "↕️", "Select exactly one planar face.")
@@ -1522,6 +1620,42 @@ class MainWindow(QMainWindow):
             if i in self.doc.errors:
                 QMessageBox.warning(self, "Operation failed", self.doc.errors[i])
                 f.value, f.axis, f.cut = old
+                f.version += 1
+                self.rebuild()
+            return
+        elif f.kind == "sweep":
+            paths = [(j, f"{j}: {g.name}") for j, g in enumerate(self.doc.features)
+                     if g.kind == "sketch" and j != f.sketch_ref and g.sketch.lines]
+            dlg = SweepDialog(self, paths, f.path_ref, f.cut)
+            if not dlg.exec():
+                return
+            old = (f.path_ref, f.cut)
+            f.path_ref, f.cut = dlg.path_ref, dlg.cut
+            f.version += 1
+            self.rebuild()
+            if i in self.doc.errors:
+                QMessageBox.warning(self, "Operation failed", self.doc.errors[i])
+                f.path_ref, f.cut = old
+                f.version += 1
+                self.rebuild()
+            return
+        elif f.kind == "loft":
+            sections = [(j, f"{j}: {g.name}") for j, g in enumerate(self.doc.features)
+                        if g.kind == "sketch" and len(g.sketch.regions()) == 1]
+            dlg = LoftDialog(self, sections, f.section_refs, f.cut)
+            if not dlg.exec():
+                return
+            new_refs = dlg.section_refs
+            if len(new_refs) < 2:
+                QMessageBox.information(self, "Loft", "Select at least two section sketches.")
+                return
+            old = (f.section_refs, f.cut)
+            f.section_refs, f.cut = new_refs, dlg.cut
+            f.version += 1
+            self.rebuild()
+            if i in self.doc.errors:
+                QMessageBox.warning(self, "Operation failed", self.doc.errors[i])
+                f.section_refs, f.cut = old
                 f.version += 1
                 self.rebuild()
             return

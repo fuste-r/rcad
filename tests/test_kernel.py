@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from rcad.kernel import Document, Feature
-from rcad.sketch import Constraint, Sketch, standard_plane
+from rcad.sketch import Constraint, Sketch, SketchPlane, standard_plane
 
 
 def rect_sketch(w=40, h=30):
@@ -86,6 +86,55 @@ def test_revolve_can_cut_existing_solid():
     assert not doc.errors, doc.errors
     expected = np.pi * 15**2 * 30 - np.pi * (10**2 - 5**2) * 30
     assert doc.part.volume == pytest.approx(expected, rel=1e-6)
+
+
+def test_sweep_profile_along_sketch_path_roundtrip(tmp_path):
+    profile = Sketch(standard_plane("XY"))
+    profile.add_rect(0, 0, 10, 4)
+    path = Sketch(standard_plane("XZ"))
+    path.points = [[0, 0], [0, 20]]
+    path.add_line(0, 1)
+    doc = Document([
+        Feature("sketch", "Profile", sketch=profile),
+        Feature("sketch", "Path", sketch=path),
+        Feature("sweep", sketch_ref=0, path_ref=1),
+    ])
+
+    doc.rebuild()
+    assert not doc.errors, doc.errors
+    assert doc.part.volume == pytest.approx(800.0, rel=1e-6)
+
+    target = tmp_path / "sweep.rcad"
+    doc.save(str(target))
+    loaded = Document.load(str(target))
+    assert not loaded.errors, loaded.errors
+    assert loaded.features[-1].kind == "sweep"
+    assert loaded.features[-1].path_ref == 1
+    assert loaded.part.volume == pytest.approx(800.0, rel=1e-6)
+
+
+def test_loft_between_sketch_sections_roundtrip(tmp_path):
+    lower = Sketch(standard_plane("XY"))
+    lower.add_rect(-5, -5, 5, 5)
+    upper = Sketch(SketchPlane((0, 0, 10), (1, 0, 0), (0, 0, 1)))
+    upper.add_rect(-10, -10, 10, 10)
+    doc = Document([
+        Feature("sketch", "Lower", sketch=lower),
+        Feature("sketch", "Upper", sketch=upper),
+        Feature("loft", section_refs=[0, 1]),
+    ])
+
+    doc.rebuild()
+    assert not doc.errors, doc.errors
+    expected = 10 / 3 * (100 + 200 + 400)
+    assert doc.part.volume == pytest.approx(expected, rel=1e-6)
+
+    target = tmp_path / "loft.rcad"
+    doc.save(str(target))
+    loaded = Document.load(str(target))
+    assert not loaded.errors, loaded.errors
+    assert loaded.features[-1].section_refs == [0, 1]
+    assert loaded.part.volume == pytest.approx(expected, rel=1e-6)
 
 
 def test_pushpull_fillet_chamfer_and_roundtrip(tmp_path):

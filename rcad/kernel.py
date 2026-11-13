@@ -5,13 +5,13 @@ import json
 from dataclasses import dataclass, field
 
 import numpy as np
-from build123d import Axis, GeomType, Shape, Solid, Vector, export_step, export_stl
+from build123d import Axis, Edge, GeomType, Shape, Solid, Vector, Wire, export_step, export_stl, loft
 
 from .sketch import Sketch
 from .units import MM, UNITS, Unit
 
 FORMAT_VERSION = 1
-KINDS = ("sketch", "extrude", "revolve", "pushpull", "fillet", "chamfer")
+KINDS = ("sketch", "extrude", "revolve", "sweep", "loft", "pushpull", "fillet", "chamfer")
 
 
 @dataclass
@@ -32,6 +32,8 @@ class Feature:
     result_edges: list = field(default_factory=list, repr=False)  # fillet: mids of the rounded edges it created
     edge_dirs: list = field(default_factory=list, repr=False)  # fillet: unit direction of each picked edge (pre-fillet mesh)
     axis: str = "v"  # revolve: sketch-local axis, "u" or "v"
+    path_ref: int = -1  # sweep: sketch feature containing the path
+    section_refs: list = field(default_factory=list)  # loft: ordered sketch section feature indices
 
     def label(self, unit: Unit = MM) -> str:
         if self.kind == "sketch":
@@ -45,6 +47,10 @@ class Feature:
             mode = "Cut" if self.cut else "Revolve"
             part = f", {len(self.profiles)} region(s)" if self.profiles is not None else ""
             return f"{mode} ({self.value:g} deg, {self.axis.upper()} axis{part}) of #{self.sketch_ref}"
+        if self.kind == "sweep":
+            return f"{'Cut' if self.cut else 'Sweep'} #{self.sketch_ref} along #{self.path_ref}"
+        if self.kind == "loft":
+            return f"{'Cut' if self.cut else 'Loft'} x{len(self.section_refs)} sections"
         if self.kind == "pushpull":
             return f"Push/Pull {'+' if self.value >= 0 else '-'}{unit.fmt(abs(self.value))}"
         return f"{self.kind.title()} {unit.fmt(self.value)} x{len(self.edges)}"
@@ -54,6 +60,7 @@ class Feature:
              "cut": self.cut, "face": self.face, "edges": [list(e) for e in self.edges], "visible": self.visible,
              "profiles": self.profiles,             "auto": self.auto, "result_edges": [list(e) for e in self.result_edges],
              "axis": self.axis,
+             "path_ref": self.path_ref, "section_refs": self.section_refs,
              "edge_dirs": [list(d) for d in self.edge_dirs]}
         if self.sketch:
             d["sketch"] = self.sketch.to_dict()
@@ -68,7 +75,8 @@ class Feature:
                        tuple(map(tuple, d["face"])) if d.get("face") else None,
                        [tuple(e) for e in d.get("edges", [])], d.get("visible", True), d.get("profiles"),
                        d.get("auto", False), result_edges=[tuple(e) for e in d.get("result_edges", [])],
-                       edge_dirs=[tuple(d) for d in d.get("edge_dirs", [])], axis=d.get("axis", "v"))
+                       edge_dirs=[tuple(d) for d in d.get("edge_dirs", [])], axis=d.get("axis", "v"),
+                       path_ref=d.get("path_ref", -1), section_refs=list(d.get("section_refs", [])))
 
 
 @dataclass
@@ -274,6 +282,35 @@ class Document:
                 revolved = Solid.revolve(face, f.value, axis)
                 solid = revolved if solid is None else solid.fuse(revolved).clean()
             return self._combine(part, solid, f.cut)
+        if f.kind == "sweep":
+            profile_sketch = self._sketch_for_feature(f.sketch_ref, "sweep profile")
+            path_sketch = self._sketch_for_feature(f.path_ref, "sweep path")
+            profile_regions = self._selected_regions(profile_sketch, f.profiles)
+            if len(profile_regions) != 1:
+                raise ValueError("sweep requires exactly one closed profile region")
+            paths = [Edge.make_line(path_sketch.plane.to3d(*path_sketch.points[a]),
+                                    path_sketch.plane.to3d(*path_sketch.points[b]))
+                     for a, b in path_sketch.lines]
+            wires = Wire.combine(paths)
+            if len(wires) != 1 or not wires[0].is_valid:
+                raise ValueError("sweep path must be one connected set of sketch lines")
+            face = profile_sketch.plane.b123d().from_local_coords(
+                profile_sketch._region_face(profile_regions[0]))
+            solid = Solid.sweep(face, wires[0])
+            return self._combine(part, solid, f.cut)
+        if f.kind == "loft":
+            if len(f.section_refs) < 2:
+                raise ValueError("loft requires at least two section sketches")
+            section_faces = []
+            for ref in f.section_refs:
+                section_sketch = self._sketch_for_feature(ref, "loft section")
+                regions = section_sketch.regions()
+                if len(regions) != 1:
+                    raise ValueError("each loft section must contain exactly one closed profile")
+                section_faces.append(section_sketch.plane.b123d().from_local_coords(
+                    section_sketch._region_face(regions[0])))
+            solid = loft(section_faces)
+            return self._combine(part, solid, f.cut)
         if f.kind == "pushpull":
             if part is None:
                 raise ValueError("nothing to push/pull")
@@ -306,6 +343,21 @@ class Document:
             # body; fuse into one Part rather than the old Solid(...) container.
             return modified[0] if len(modified) == 1 else modified[0].fuse(*modified[1:]).clean()
         raise ValueError(f"unknown feature {f.kind}")
+
+    def _sketch_for_feature(self, index: int, role: str) -> Sketch:
+        if not 0 <= index < len(self.features) or self.features[index].kind != "sketch":
+            raise ValueError(f"{role} has no valid sketch")
+        sketch = self.features[index].sketch
+        sketch.variables = self.variables
+        return sketch
+
+    @staticmethod
+    def _selected_regions(sketch: Sketch, profiles: list | None):
+        regions = sketch.regions()
+        if profiles is not None:
+            selected = {i for point in profiles if (i := sketch.region_at(*point)) is not None}
+            regions = [region for i, region in enumerate(regions) if i in selected]
+        return regions
 
     @staticmethod
     def _combine(part, solid, cut):
