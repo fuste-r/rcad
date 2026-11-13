@@ -162,6 +162,35 @@ def test_expression_constraint_create_undo_redo_and_roundtrip(qapp, monkeypatch,
     assert np.linalg.norm(np.array(loaded_sketch.points[1]) - np.array(loaded_sketch.points[0])) == pytest.approx(25)
 
 
+def test_sketch_undo_redo_histories_are_isolated(qapp):
+    first = Sketch(standard_plane("XY"), points=[[0, 0]])
+    second = Sketch(standard_plane("XY"), points=[[5, 5]])
+    w = MainWindow()
+    w.doc.features = [Feature("sketch", "First", sketch=first), Feature("sketch", "Second", sketch=second)]
+
+    w.enter_sketch(0)
+    w._push_sketch_undo()
+    first.add_point(1, 1)
+    w.enter_sketch(1)
+    w._push_sketch_undo()
+    second.add_point(6, 6)
+
+    w.undo()
+    assert len(second.points) == 1
+    assert len(first.points) == 2
+    w.redo()
+    assert len(second.points) == 2
+    assert len(first.points) == 2
+
+    w.enter_sketch(0)
+    w.undo()
+    assert len(first.points) == 1
+    assert len(second.points) == 2
+    w.redo()
+    assert len(first.points) == 2
+    assert len(second.points) == 2
+
+
 def test_variable_edit_resolves_rebuilds_and_saves_geometry(qapp, monkeypatch, tmp_path):
     sketch = Sketch(standard_plane("XY"))
     sketch.add_rect(0, 0, 10, 10)

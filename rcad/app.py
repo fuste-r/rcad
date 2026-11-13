@@ -297,8 +297,8 @@ class MainWindow(QMainWindow):
         self._restoring = False
         self._mirror_axis = None   # (a_idx, b_idx, line_idx) for symmetry tool
         self._mirroring = False
-        self._sketch_undo: list[tuple[int, dict]] = []
-        self._sketch_redo: list[tuple[int, dict]] = []
+        self._sketch_undo: dict[int, list[dict]] = {}
+        self._sketch_redo: dict[int, list[dict]] = {}
         self._sketch_restoring = False
         self._fillet_live_idx = None
         self._fillet_preview_r = None
@@ -561,8 +561,8 @@ class MainWindow(QMainWindow):
     def _push_sketch_undo(self):
         if self._sketch_restoring or self.mode != "sketch":
             return
-        self._sketch_undo.append((self.sketch_index, self.sketch.to_dict()))
-        self._sketch_redo.clear()
+        self._sketch_undo.setdefault(self.sketch_index, []).append(self.sketch.to_dict())
+        self._sketch_redo.pop(self.sketch_index, None)
 
     def _restore_sketch(self, d, index):
         sk = self.doc.features[index].sketch
@@ -582,24 +582,28 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def undo_sketch(self):
-        if not self._sketch_undo:
+        history = self._sketch_undo.get(self.sketch_index, [])
+        if not history:
             return False
         self._sketch_restoring = True
-        self._sketch_redo.append((self.sketch_index, self.sketch.to_dict()))
-        sk_idx, d = self._sketch_undo.pop()
-        self._restore_sketch(d, sk_idx)
+        self._sketch_redo.setdefault(self.sketch_index, []).append(self.sketch.to_dict())
+        self._restore_sketch(history.pop(), self.sketch_index)
         self._sketch_restoring = False
         return True
 
     def redo_sketch(self):
-        if not self._sketch_redo:
+        history = self._sketch_redo.get(self.sketch_index, [])
+        if not history:
             return False
         self._sketch_restoring = True
-        self._sketch_undo.append((self.sketch_index, self.sketch.to_dict()))
-        sk_idx, d = self._sketch_redo.pop()
-        self._restore_sketch(d, sk_idx)
+        self._sketch_undo.setdefault(self.sketch_index, []).append(self.sketch.to_dict())
+        self._restore_sketch(history.pop(), self.sketch_index)
         self._sketch_restoring = False
         return True
+
+    def _clear_sketch_history(self):
+        self._sketch_undo.clear()
+        self._sketch_redo.clear()
 
     def undo(self):
         if self.mode == "sketch" and self.undo_sketch():
@@ -611,6 +615,7 @@ class MainWindow(QMainWindow):
         d = self._undo.pop()
         self.doc = Document([Feature.from_dict(f) for f in d["features"]], units=d.get("units", "mm"))
         self.doc.variables = d.get("variables", {})
+        self._clear_sketch_history()
         self.sketch_index = -1
         self.set_mode("model")
         self.doc.rebuild()
@@ -629,6 +634,7 @@ class MainWindow(QMainWindow):
         d = self._redo.pop()
         self.doc = Document([Feature.from_dict(f) for f in d["features"]], units=d.get("units", "mm"))
         self.doc.variables = d.get("variables", {})
+        self._clear_sketch_history()
         self.sketch_index = -1
         self.set_mode("model")
         self.doc.rebuild()
@@ -1716,6 +1722,7 @@ class MainWindow(QMainWindow):
             return
         self._push_undo()
         self.doc.delete(i)
+        self._clear_sketch_history()
         self.rebuild()
 
     # ---- files
@@ -1730,8 +1737,7 @@ class MainWindow(QMainWindow):
         self.sketch_index = -1
         self._undo.clear()
         self._redo.clear()
-        self._sketch_undo.clear()
-        self._sketch_redo.clear()
+        self._clear_sketch_history()
         self.set_mode("model")
         self.mark_dirty(False)
         self._apply_units()
