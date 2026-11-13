@@ -30,7 +30,8 @@ class Feature:
     resolved_cut: bool | None = field(default=None, compare=False, repr=False)  # last auto decision
     version: int = 0  # incremented on edit to enable shape caching
     result_edges: list = field(default_factory=list, repr=False)  # fillet: mids of the rounded edges it created
-    edge_dirs: list = field(default_factory=list, repr=False)  # fillet: unit direction of each picked edge (pre-fillet mesh)
+    edge_dirs: list = field(default_factory=list, repr=False)  # fillet: aligned unit directions; None for curved edges
+    edge_refs: list = field(default_factory=list, repr=False)  # fillet: sampled picked-edge paths, one per edge
     axis: str = "v"  # revolve: sketch-local axis, "u" or "v"
     path_ref: int = -1  # sweep: sketch feature containing the path
     section_refs: list = field(default_factory=list)  # loft: ordered sketch section feature indices
@@ -61,7 +62,9 @@ class Feature:
              "profiles": self.profiles,             "auto": self.auto, "result_edges": [list(e) for e in self.result_edges],
              "axis": self.axis,
              "path_ref": self.path_ref, "section_refs": self.section_refs,
-             "edge_dirs": [list(d) for d in self.edge_dirs]}
+             "edge_dirs": [list(d) if d is not None else None for d in self.edge_dirs],
+             "edge_refs": [[list(point) for point in path] if path is not None else None
+                           for path in self.edge_refs]}
         if self.sketch:
             d["sketch"] = self.sketch.to_dict()
         return d
@@ -75,7 +78,10 @@ class Feature:
                        tuple(map(tuple, d["face"])) if d.get("face") else None,
                        [tuple(e) for e in d.get("edges", [])], d.get("visible", True), d.get("profiles"),
                        d.get("auto", False), result_edges=[tuple(e) for e in d.get("result_edges", [])],
-                       edge_dirs=[tuple(d) for d in d.get("edge_dirs", [])], axis=d.get("axis", "v"),
+                       edge_dirs=[tuple(direction) if direction is not None else None
+                                  for direction in d.get("edge_dirs", [])],
+                       edge_refs=[[tuple(point) for point in path] if path is not None else None
+                                  for path in d.get("edge_refs", [])], axis=d.get("axis", "v"),
                        path_ref=d.get("path_ref", -1), section_refs=list(d.get("section_refs", [])))
 
 

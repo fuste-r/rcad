@@ -503,6 +503,63 @@ def test_fillet_result_edges_stay_current_across_fillets(qapp, monkeypatch, tmp_
                    for m in f.result_edges)
 
 
+def test_fillet_metadata_stays_aligned_for_circular_and_straight_edges(qapp, tmp_path):
+    sketch = Sketch(standard_plane("XY"))
+    sketch.add_rect(0, 0, 20, 10)
+    center = sketch.add_point(30, 10)
+    sketch.add_circle(center, 5)
+    w = MainWindow()
+    w.doc.features = [Feature("sketch", "Mixed", sketch=sketch), Feature("extrude", sketch_ref=0, value=10)]
+    w.doc.rebuild()
+    assert not w.doc.errors, w.doc.errors
+    circle = next(edge for edge in w.doc.mesh.edges if len(edge.polyline) > 2 and abs(edge.mid[2]) < 1e-6)
+    straight = next(edge for edge in w.doc.mesh.edges
+                    if len(edge.polyline) == 2 and np.allclose(edge.mid, (20, 10, 5)))
+    mids = [tuple(circle.mid), tuple(straight.mid)]
+
+    directions = w._fillet_edge_dirs(mids)
+    assert len(directions) == len(mids)
+    assert directions[0] is None
+    assert directions[1] is not None
+
+    feature = Feature("fillet", value=1, edges=mids, edge_dirs=directions,
+                      edge_refs=w._fillet_edge_refs(mids))
+    assert len(feature.edge_refs) == len(mids)
+    assert w.commit(feature)
+    assert not w.doc.errors, w.doc.errors
+    assert feature.result_edges
+    assert all(w._find_fillet_by_edge(mid) == len(w.doc.features) - 1 for mid in feature.result_edges)
+
+    second_edge = next(edge for edge in w.doc.mesh.edges
+                       if len(edge.polyline) == 2 and np.allclose(edge.mid, (0, 0, 5)))
+    second_mids = [tuple(second_edge.mid)]
+    second = Feature("fillet", value=1, edges=second_mids,
+                     edge_dirs=w._fillet_edge_dirs(second_mids),
+                     edge_refs=w._fillet_edge_refs(second_mids))
+    assert w.commit(second)
+    assert not w.doc.errors, w.doc.errors
+    assert second.result_edges
+    assert not (set(map(tuple, feature.result_edges)) & set(map(tuple, second.result_edges)))
+    assert all(w._find_fillet_by_edge(mid) == len(w.doc.features) - 1 for mid in second.result_edges)
+
+    path = tmp_path / "mixed-fillet.rcad"
+    w.doc.save(str(path))
+    loaded = appmod.Document.load(str(path))
+    w2 = MainWindow()
+    w2.doc = loaded
+    w2._refresh_fillet_result_edges()
+    loaded_fillet, loaded_second = loaded.features[-2:]
+    assert len(loaded_fillet.edge_refs) == 2
+    assert loaded_fillet.edge_dirs == [None, directions[1]]
+    assert loaded_fillet.result_edges
+    assert loaded_second.result_edges
+    assert not (set(map(tuple, loaded_fillet.result_edges)) & set(map(tuple, loaded_second.result_edges)))
+    assert all(w2._find_fillet_by_edge(mid) == len(loaded.features) - 2
+               for mid in loaded_fillet.result_edges)
+    assert all(w2._find_fillet_by_edge(mid) == len(loaded.features) - 1
+               for mid in loaded_second.result_edges)
+
+
 def test_layer_checkbox_toggles(qapp, monkeypatch):
     w = MainWindow()
     w.view.resize(1000, 700)

@@ -1440,7 +1440,7 @@ class MainWindow(QMainWindow):
         self.commit(Feature("pushpull", value=dist, face=(center, normal)))
 
     def _fillet_edge_dirs(self, mids: list) -> list:
-        """Unit direction of each picked edge, looked up in the pre-fillet mesh."""
+        """Aligned unit directions of picked edges; curved edges have no direction."""
         mesh = self.doc.mesh
         if mesh is None:
             return []
@@ -1453,13 +1453,43 @@ class MainWindow(QMainWindow):
                 if d < best_d:
                     best_e, best_d = e, d
             if best_e is None:
+                dirs.append(None)
+                continue
+            if len(best_e.polyline) > 2:
+                dirs.append(None)
                 continue
             p = np.asarray(best_e.polyline, float)
             v = p[-1] - p[0]
             n = float(np.linalg.norm(v))
-            if n > 1e-9:
-                dirs.append(tuple((v / n).tolist()))
+            dirs.append(tuple((v / n).tolist()) if n > 1e-9 else None)
         return dirs
+
+    def _fillet_edge_refs(self, mids: list) -> list:
+        """Sampled path for each picked mesh edge, preserving selection order."""
+        mesh = self.doc.mesh
+        if mesh is None:
+            return []
+        refs = []
+        for mid in mids:
+            point = np.asarray(mid, float)
+            best = min(mesh.edges, key=lambda edge: float(np.linalg.norm(edge.mid - point)), default=None)
+            if best is None or float(np.linalg.norm(best.mid - point)) >= 1e-4:
+                refs.append(None)
+            else:
+                refs.append([tuple(map(float, p)) for p in best.polyline])
+        return refs
+
+    @staticmethod
+    def _point_path_distance(point: np.ndarray, path: list) -> float:
+        points = np.asarray(path, float)
+        if len(points) == 1:
+            return float(np.linalg.norm(point - points[0]))
+        starts, directions = points[:-1], points[1:] - points[:-1]
+        lengths_sq = np.einsum("ij,ij->i", directions, directions)
+        fractions = np.divide(np.einsum("ij,ij->i", point - starts, directions), lengths_sq,
+                              out=np.zeros_like(lengths_sq), where=lengths_sq > 1e-18)
+        closest = starts + np.clip(fractions, 0, 1)[:, None] * directions
+        return float(np.min(np.linalg.norm(closest - point, axis=1)))
 
     def _fillet_result_edges(self, f: Feature) -> list:
         """Mids of the curve edges this fillet created in the current mesh.
@@ -1475,6 +1505,25 @@ class MainWindow(QMainWindow):
             return []
         mids = [tuple(map(float, e.mid)) for e in self.doc.mesh.edges
                 if len(e.polyline) > 2]
+        if f.edge_refs:
+            fillets = [(i, feature) for i, feature in enumerate(self.doc.features)
+                       if feature.kind == "fillet" and feature.edge_refs]
+            target_index = next((i for i, feature in fillets if feature is f), None)
+            result = []
+            for mid in mids:
+                point = np.asarray(mid, float)
+                owner, best_score = None, float("inf")
+                for index, feature in fillets:
+                    paths = [path for path in feature.edge_refs if path]
+                    if not paths or feature.value <= 0:
+                        continue
+                    distance = min(self._point_path_distance(point, path) for path in paths)
+                    score = distance / feature.value
+                    if distance <= feature.value + 1e-3 and score < best_score:
+                        owner, best_score = index, score
+                if owner == target_index:
+                    result.append(mid)
+            return result
         if not f.edge_dirs:  # legacy feature (saved before edge_dirs existed)
             return mids
         res = []
@@ -1570,7 +1619,7 @@ class MainWindow(QMainWindow):
             return
         if radius > 1e-4:
             feature = Feature("fillet", value=float(radius), edges=mids,
-                              edge_dirs=self._fillet_edge_dirs(mids))
+                              edge_dirs=self._fillet_edge_dirs(mids), edge_refs=self._fillet_edge_refs(mids))
             if self.commit(feature):
                 feature.result_edges = self._fillet_result_edges(feature)
 
@@ -1593,7 +1642,8 @@ class MainWindow(QMainWindow):
                 self._fillet_mod_prev = self.doc.features[mod_idx].value
             else:
                 self.doc.features.append(Feature("fillet", value=float(radius), edges=mids,
-                                                 edge_dirs=self._fillet_edge_dirs(mids)))
+                                                 edge_dirs=self._fillet_edge_dirs(mids),
+                                                 edge_refs=self._fillet_edge_refs(mids)))
                 self._fillet_live_idx = len(self.doc.features) - 1
             self._fillet_preview_r = None
         elif self._fillet_preview_r is not None and abs(radius - self._fillet_preview_r) < 0.05:
@@ -1618,7 +1668,8 @@ class MainWindow(QMainWindow):
         v, ok = self.ask_length(kind.title(), "Size", 1.0, 1e-4, 1e4)
         if ok:
             dirs = self._fillet_edge_dirs(mids) if kind == "fillet" else []
-            self.commit(Feature(kind, value=v, edges=mids, edge_dirs=dirs))
+            refs = self._fillet_edge_refs(mids) if kind == "fillet" else []
+            self.commit(Feature(kind, value=v, edges=mids, edge_dirs=dirs, edge_refs=refs))
 
     def fillet(self):
         self._edge_feature("fillet")
