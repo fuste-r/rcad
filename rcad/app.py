@@ -910,6 +910,7 @@ class MainWindow(QMainWindow):
         return None if best is None else best[1:]
 
     def _solve_sketch(self):
+        self.sketch.variables = self.doc.variables
         ok = self.sketch.solve()
         if not ok:
             self.statusBar().showMessage(f"Solver: {self.sketch.status}", 6000)
@@ -1042,14 +1043,13 @@ class MainWindow(QMainWindow):
                 new = [Constraint("spacing", [sk.lines[lines[0]][0], lines[1]], value)]
             elif kind == "expression" and len(pts) == 2 and not lines and not circles:
                 dialog = ExpressionDialog(self, "(e.g. 2*a + 3)π")
-                if dialog.exec():
-                    expr = dialog.expression()
-                    if expr:
-                        new = [Constraint("expression", [pts[0], pts[1]], expression=expr)]
-                        self.statusBar().showMessage(f"Expression: {expr}", 6000)
-                        sk.version += 1
-                        self._solve_sketch()
-                return
+                if not dialog.exec():
+                    return
+                expr = dialog.expression()
+                if not expr:
+                    return
+                new = [Constraint("expression", [pts[0], pts[1]], expression=expr)]
+                self.statusBar().showMessage(f"Expression: {expr}", 6000)
             elif kind == "distance":
                 ends = pts if len(pts) == 2 and not lines else list(sk.lines[lines[0]]) if len(lines) == 1 and not pts else None
                 if ends:

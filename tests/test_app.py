@@ -118,6 +118,50 @@ def test_full_workflow(qapp, monkeypatch, tmp_path):
     assert [f.kind for f in w.doc.features][:1] != ["extrude"]
 
 
+def test_expression_constraint_create_undo_redo_and_roundtrip(qapp, monkeypatch, tmp_path):
+    w = MainWindow()
+    sketch = Sketch(standard_plane("XY"), points=[[0, 0], [10, 0]])
+    w.doc.features = [Feature("sketch", "S1", sketch=sketch)]
+    w.doc.variables = {"a": 12.5}
+    w.enter_sketch(0)
+    w.view.sketch_sel = {("p", 0), ("p", 1)}
+
+    class AcceptedExpressionDialog:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return True
+
+        def expression(self):
+            return "2*a"
+
+    monkeypatch.setattr(appmod, "ExpressionDialog", AcceptedExpressionDialog)
+    w.add_constraint("expression")
+    assert len(sketch.constraints) == 1
+    assert sketch.constraints[0].expression == "2*a"
+    assert np.linalg.norm(np.array(sketch.points[1]) - np.array(sketch.points[0])) == pytest.approx(25)
+
+    assert w.undo_sketch()
+    assert sketch.constraints == []
+    assert w.redo_sketch()
+    assert sketch.constraints[0].expression == "2*a"
+    assert np.linalg.norm(np.array(sketch.points[1]) - np.array(sketch.points[0])) == pytest.approx(25)
+
+    w.finish_sketch()
+    w.doc.rebuild(0)
+    assert sketch.constraints[0].expression == "2*a"
+
+    path = tmp_path / "expression.rcad"
+    w.doc.save(str(path))
+    loaded = appmod.Document.load(str(path))
+    loaded_sketch = loaded.features[0].sketch
+    loaded_sketch.variables = loaded.variables
+    assert loaded_sketch.constraints[0].expression == "2*a"
+    assert loaded_sketch.solve()
+    assert np.linalg.norm(np.array(loaded_sketch.points[1]) - np.array(loaded_sketch.points[0])) == pytest.approx(25)
+
+
 def test_revolve_workflow_and_edit(qapp, monkeypatch):
     w = MainWindow()
     w.plane_combo.setCurrentText("XZ")
