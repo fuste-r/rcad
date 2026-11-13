@@ -465,11 +465,34 @@ class MainWindow(QMainWindow):
 
     # ---- variables / expressions
     def _edit_variables(self):
-        self._push_undo()
         dialog = VariablesDialog(self, self.doc.variables)
-        if dialog.exec():
-            self.doc.variables = dialog.variables()
-            self.refresh()
+        if not dialog.exec():
+            return
+        variables = dialog.variables()
+        solved_sketches = []
+        try:
+            for feature in self.doc.features:
+                if feature.kind != "sketch" or feature.sketch is None:
+                    continue
+                sketch = Sketch.from_dict(feature.sketch.to_dict())
+                sketch.variables = variables
+                if not sketch.solve():
+                    raise ValueError(sketch.status)
+                solved_sketches.append((feature.sketch, sketch))
+        except Exception as error:
+            QMessageBox.warning(self, "Invalid variables", str(error))
+            return
+
+        self._push_undo()
+        self.doc.variables = variables
+        for sketch, solved in solved_sketches:
+            sketch.variables = variables
+            sketch.points = [list(point) for point in solved.points]
+            sketch.circles = list(solved.circles)
+            sketch.status = solved.status
+            sketch.dof = solved.dof
+            sketch.version += 1
+        self.rebuild()
 
     # ---- state / refresh
     def set_mode(self, mode):

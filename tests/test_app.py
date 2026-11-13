@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox
 from rcad import app as appmod
 from rcad.app import MainWindow
 from rcad.kernel import Feature
-from rcad.sketch import Sketch, SketchPlane, standard_plane
+from rcad.sketch import Constraint, Sketch, SketchPlane, standard_plane
 
 
 @pytest.fixture(scope="module")
@@ -160,6 +160,53 @@ def test_expression_constraint_create_undo_redo_and_roundtrip(qapp, monkeypatch,
     assert loaded_sketch.constraints[0].expression == "2*a"
     assert loaded_sketch.solve()
     assert np.linalg.norm(np.array(loaded_sketch.points[1]) - np.array(loaded_sketch.points[0])) == pytest.approx(25)
+
+
+def test_variable_edit_resolves_rebuilds_and_saves_geometry(qapp, monkeypatch, tmp_path):
+    sketch = Sketch(standard_plane("XY"))
+    sketch.add_rect(0, 0, 10, 10)
+    sketch.constraints += [Constraint("fixed", [0]), Constraint("expression", [0, 1], expression="a")]
+    doc = appmod.Document([
+        Feature("sketch", "Profile", sketch=sketch),
+        Feature("extrude", sketch_ref=0, value=5),
+    ], variables={"a": 10.0})
+    doc.rebuild()
+    assert not doc.errors, doc.errors
+    initial_volume = doc.part.volume
+
+    class AcceptedVariablesDialog:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self):
+            return True
+
+        def variables(self):
+            return {"a": 20.0}
+
+    w = MainWindow()
+    w.doc = doc
+    w.refresh()
+    monkeypatch.setattr(appmod, "VariablesDialog", AcceptedVariablesDialog)
+    w._edit_variables()
+
+    assert w.doc.variables == {"a": 20.0}
+    assert w.dirty
+    assert not w.doc.errors, w.doc.errors
+    assert w.doc.part.volume == pytest.approx(initial_volume * 2, rel=1e-6)
+    w.undo()
+    assert w.doc.variables == {"a": 10.0}
+    assert w.doc.part.volume == pytest.approx(initial_volume, rel=1e-6)
+    w.redo()
+    assert w.doc.variables == {"a": 20.0}
+    assert w.doc.part.volume == pytest.approx(initial_volume * 2, rel=1e-6)
+
+    path = tmp_path / "variable-edit.rcad"
+    w.doc.save(str(path))
+    loaded = appmod.Document.load(str(path))
+    assert loaded.variables == {"a": 20.0}
+    assert not loaded.errors, loaded.errors
+    assert loaded.part.volume == pytest.approx(initial_volume * 2, rel=1e-6)
 
 
 def test_revolve_workflow_and_edit(qapp, monkeypatch):

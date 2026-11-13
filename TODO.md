@@ -3,7 +3,7 @@
 ## P0: Correctness and stability
 
 - [x] Fix expression-constraint creation: append the new constraint before solving, then verify it survives rebuild, undo/redo, and save/load.
-- [ ] Make variable edits re-solve dependent expressions, rebuild the model, and mark the document dirty. Test editing a variable and confirming the updated geometry is saved.
+- [x] Make variable edits re-solve dependent expressions, rebuild the model, and mark the document dirty. Test editing a variable and confirming the updated geometry is saved.
 - [ ] Scope sketch undo/redo history to the sketch being edited, or clear/switch histories safely when entering another sketch. Test undo and redo after moving between sketches.
 - [ ] Fix fillet result-edge ownership for circular and mixed edge selections. Keep metadata associated with each selected edge instead of relying on a shortened parallel direction list. Verify multiple fillets remain independently editable after rebuild and save/load.
 - [ ] Replace midpoint-only face and edge references with stable references or deterministic geometric signatures. When an upstream edit removes or makes a reference ambiguous, report which feature needs repair instead of silently binding to a different entity.
