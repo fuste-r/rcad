@@ -7,8 +7,8 @@ import numpy as np
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut, QSurfaceFormat
 from PySide6.QtWidgets import (
-    QApplication, QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDockWidget, QDoubleSpinBox, QFileDialog,
-    QFormLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
+    QApplication, QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDockWidget, QFileDialog,
+    QFormLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
     QPushButton, QTextEdit,
     QToolBar, QWidget,
     QVBoxLayout,
@@ -26,23 +26,18 @@ from .sketch import (
 )
 from .units import MM, UNITS
 from .theme import CHOICES, apply_choice
-from .value_box import FieldSet
+from .value_box import FieldSet, NumberField, bind_ok
 from .viewport import Viewport
 
 FILE_FILTER = "rCad project (*.rcad)"
 
 
 class ExtrudeDialog(QDialog):
-    def __init__(self, parent, distance=10.0, auto=True, cut=False, show_mode=True, unit=MM):
+    def __init__(self, parent, distance=10.0, auto=True, cut=False, show_mode=True, unit=MM, variables=None):
         super().__init__(parent)
         self.unit = unit
         self.setWindowTitle("⇈")
-        self.dist = QDoubleSpinBox()
-        self.dist.setRange(-1e5, 1e5)
-        self.dist.setDecimals(unit.decimals)
-        self.dist.setSuffix(f" {unit.name}")
-        self.dist.setValue(unit.from_mm(distance))
-        self._orig, self._shown = distance, self.dist.value()
+        self.dist = NumberField(distance, "length", unit, variables, lo=-1e5, hi=1e5)
         self.mode = QComboBox()
         self.mode.addItems(["Auto (into the body = cut, away = add)", "Add (join)", "Cut (subtract)"])
         self.mode.setCurrentIndex(0 if auto else 2 if cut else 1)
@@ -53,13 +48,13 @@ class ExtrudeDialog(QDialog):
         box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         box.accepted.connect(self.accept)
         box.rejected.connect(self.reject)
+        bind_ok(box, [self.dist])
         form.addRow(box)
 
     @property
     def distance_mm(self) -> float:
-        if self.dist.value() == self._shown:
-            return self._orig  # untouched: avoid display-rounding drift
-        return self.unit.to_mm(self.dist.value())
+        v = self.dist.value()  # untouched text gives the exact starting distance
+        return v if v is not None else self.dist.last_valid
 
     @property
     def auto(self) -> bool:
@@ -71,14 +66,10 @@ class ExtrudeDialog(QDialog):
 
 
 class RevolveDialog(QDialog):
-    def __init__(self, parent, angle=360.0, axis="v", cut=False):
+    def __init__(self, parent, angle=360.0, axis="v", cut=False, variables=None):
         super().__init__(parent)
         self.setWindowTitle("Revolve")
-        self.angle = QDoubleSpinBox()
-        self.angle.setRange(1.0, 360.0)
-        self.angle.setDecimals(1)
-        self.angle.setSuffix(" deg")
-        self.angle.setValue(angle)
+        self.angle = NumberField(angle, "angle", variables=variables, lo=1.0, hi=360.0)
         self.axis = QComboBox()
         self.axis.addItem("Sketch U axis", "u")
         self.axis.addItem("Sketch V axis", "v")
@@ -93,6 +84,7 @@ class RevolveDialog(QDialog):
         box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         box.accepted.connect(self.accept)
         box.rejected.connect(self.reject)
+        bind_ok(box, [self.angle])
         form.addRow(box)
 
     @property
@@ -168,6 +160,24 @@ class LoftDialog(QDialog):
         return self.mode.currentIndex() == 1
 
 
+class NumberDialog(QDialog):
+    """One labelled NumberField with OK/Cancel (replaces QInputDialog.getDouble)."""
+
+    def __init__(self, parent, title: str, label: str, field: NumberField):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.field = field
+        form = QFormLayout(self)
+        form.addRow(label, field)
+        box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        box.accepted.connect(self.accept)
+        box.rejected.connect(self.reject)
+        bind_ok(box, [field])
+        form.addRow(box)
+        field.selectAll()
+        field.setFocus()
+
+
 class ExpressionDialog(QDialog):
     def __init__(self, parent, text: str = ""):
         super().__init__(parent)
@@ -193,7 +203,8 @@ class VariablesDialog(QDialog):
         layout = QVBoxLayout(self)
         form = QFormLayout()
         self.name_edit = QLineEdit()
-        self.value_edit = QLineEdit()
+        # mm like every variable; units, maths and earlier variables work (e.g. `2in`, `wall * 2`)
+        self.value_edit = NumberField(None, "length", MM, self._vars, allow_empty=True)
         add_btn = QPushButton("Add")
         remove_btn = QPushButton("Remove")
         form.addRow("Variable", self.name_edit)
@@ -220,14 +231,13 @@ class VariablesDialog(QDialog):
 
     def _add(self):
         name = self.name_edit.text().strip()
-        value = self.value_edit.text().strip()
-        if not name or not value:
+        value = self.value_edit.value()
+        if not name.isidentifier() or value is None:
             return
-        try:
-            self._vars[name] = float(value)
-        except ValueError:
-            return
-        self.list.addItem(name)
+        new = name not in self._vars
+        self._vars[name] = value
+        if new:
+            self.list.addItem(name)
         self.name_edit.clear()
         self.value_edit.clear()
 
@@ -409,11 +419,11 @@ class MainWindow(QMainWindow):
             self.tool_actions[name] = a
             self.sketch_tb.addAction(a)
         self.sketch_tb.addSeparator()
-        self.snap = QDoubleSpinBox()
-        self.snap.setRange(0, 1000)
-        self.snap.setValue(1.0)
-        self.snap.setPrefix("snap ")
-        self.snap.setToolTip("Grid snap (0 = off)")
+        self.snap = NumberField(1.0, "length", MM, lo=0.0, hi=1e4)
+        self.snap.setFixedWidth(90)
+        self.snap.HINT = "Grid snap (0 = off). " + NumberField.HINT
+        self.snap.setToolTip(self.snap.HINT)
+        self.sketch_tb.addWidget(QLabel(" snap "))
         self.sketch_tb.addWidget(self.snap)
         self.sketch_tb.addSeparator()
         self.sketch_tb.addAction(self._act("🗑 sel", self.delete_selection, "Delete selected sketch items"))
@@ -448,9 +458,8 @@ class MainWindow(QMainWindow):
         self.unit_combo.blockSignals(True)
         self.unit_combo.setCurrentText(u.name)
         self.unit_combo.blockSignals(False)
-        self.snap.setDecimals(u.decimals)
-        self.snap.setSuffix(f" {u.name}")
-        self.snap.setValue(u.snap)
+        self.snap.unit = u
+        self.snap.set_value(u.snap * u.mm)
         self.view.unit_mm = u.mm
         self.view.unit = u
         self.refresh()
@@ -472,12 +481,12 @@ class MainWindow(QMainWindow):
 
     def ask_length(self, title, label, mm_value, lo_mm=1e-6, hi_mm=1e6):
         """Prompt for a length in the current units; returns (value in mm, accepted)."""
-        u = self.unit
-        v, ok = QInputDialog.getDouble(self, title, f"{label} ({u.name})", u.from_mm(mm_value),
-                                       u.from_mm(lo_mm), u.from_mm(hi_mm), u.decimals)
-        if v == round(u.from_mm(mm_value), u.decimals):
-            return mm_value, ok  # untouched: avoid display-rounding drift
-        return u.to_mm(v), ok
+        dlg = NumberDialog(self, title, label,
+                           NumberField(mm_value, "length", self.unit, self.doc.variables, lo_mm, hi_mm))
+        if not dlg.exec():
+            return mm_value, False
+        v = dlg.field.value()  # untouched text gives mm_value exactly
+        return (v, True) if v is not None else (mm_value, False)
 
     # ---- variables / expressions
     def _edit_variables(self):
@@ -923,7 +932,9 @@ class MainWindow(QMainWindow):
         uv = self.view.sketch_uv(x, y)
         if uv is None:
             return None
-        g = self.snap.value() * self.unit.mm
+        g = self.snap.value()
+        if g is None:
+            g = self.snap.last_valid or 0.0  # keep snapping while the text is being edited
         return None, ((round(uv[0] / g) * g, round(uv[1] / g) * g) if g > 0 else uv)
 
     def _update_regions(self):
@@ -1602,7 +1613,8 @@ class MainWindow(QMainWindow):
             return
         chosen = sorted(sk.selected_regions())
         profiles = [list(next(p for p in sk.selection if sk.region_at(*p) == r)) for r in chosen] or None
-        dlg = ExtrudeDialog(self, show_mode=self.doc.part is not None, unit=self.unit)
+        dlg = ExtrudeDialog(self, show_mode=self.doc.part is not None, unit=self.unit,
+                            variables=self.doc.variables)
         dlg.setWindowTitle(f"Extrude {len(profiles)} highlighted region(s)" if profiles else "Extrude all regions")
         if dlg.exec():
             self.commit(Feature("extrude", sketch_ref=i, value=dlg.distance_mm, cut=dlg.cut, auto=dlg.auto,
@@ -1621,7 +1633,7 @@ class MainWindow(QMainWindow):
             return
         chosen = sorted(sketch.selected_regions())
         profiles = [list(next(p for p in sketch.selection if sketch.region_at(*p) == r)) for r in chosen] or None
-        dialog = RevolveDialog(self)
+        dialog = RevolveDialog(self, variables=self.doc.variables)
         if dialog.exec():
             self.commit(Feature("revolve", sketch_ref=i, value=dialog.angle.value(), cut=dialog.cut,
                                 profiles=profiles, axis=dialog.axis_name))
@@ -2016,12 +2028,12 @@ class MainWindow(QMainWindow):
             return
         self._push_undo()
         if f.kind == "extrude":
-            dlg = ExtrudeDialog(self, f.value, f.auto, f.cut, unit=self.unit)
+            dlg = ExtrudeDialog(self, f.value, f.auto, f.cut, unit=self.unit, variables=self.doc.variables)
             if not dlg.exec():
                 return
             new = (dlg.distance_mm, dlg.cut, dlg.auto)
         elif f.kind == "revolve":
-            dlg = RevolveDialog(self, f.value, f.axis, f.cut)
+            dlg = RevolveDialog(self, f.value, f.axis, f.cut, variables=self.doc.variables)
             if not dlg.exec():
                 return
             old = (f.value, f.axis, f.cut)

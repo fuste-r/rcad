@@ -15,6 +15,15 @@ from rcad.sketch import Constraint, Sketch, standard_plane
 from rcad.units import INCH, MM
 
 
+
+def type_number(monkeypatch, text):
+    """Answer the next number dialogs by typing text (None: accept the shown value)."""
+    def exec_(self):
+        if text is not None:
+            self.field.setText(text)
+        return True
+    monkeypatch.setattr(appmod.NumberDialog, "exec", exec_)
+
 @pytest.fixture(scope="module")
 def qapp():
     return QApplication.instance() or QApplication([])
@@ -61,19 +70,19 @@ def test_ui_inches(qapp, monkeypatch, tmp_path):
     w.unit_combo.setCurrentText("in")
     assert w.doc.units == "in" and w.dirty
     assert w.view.unit_mm == pytest.approx(25.4)
-    assert w.snap.suffix() == " in" and w.snap.value() == pytest.approx(0.05)
+    assert w.snap.text() == "0.05 in" and w.snap.value() == pytest.approx(0.05 * 25.4)
 
     # lengths typed in inches are stored as millimetres
-    monkeypatch.setattr(QInputDialog, "getDouble", lambda *a, **k: (2.0, True))
+    type_number(monkeypatch, "2.0")
     assert w.ask_length("t", "l", 10.0) == (pytest.approx(50.8), True)
 
     # an untouched value keeps its exact millimetre value
-    monkeypatch.setattr(QInputDialog, "getDouble", lambda *a, **k: (round(10 / 25.4, 4), True))
+    type_number(monkeypatch, None)
     assert w.ask_length("t", "l", 10.0)[0] == 10.0
 
     d = appmod.ExtrudeDialog(w, 10.0, unit=INCH)
     assert d.distance_mm == 10.0
-    d.dist.setValue(1.0)
+    d.dist.setText("1")
     assert d.distance_mm == pytest.approx(25.4)
 
     # dimension a sketch line in inches
@@ -81,7 +90,7 @@ def test_ui_inches(qapp, monkeypatch, tmp_path):
     w.new_sketch()
     w.sketch.add_rect(0, 0, 30, 20)
     w.view.sketch_sel = {("l", 0)}
-    monkeypatch.setattr(QInputDialog, "getDouble", lambda *a, **k: (2.0, True))
+    type_number(monkeypatch, "2.0")
     w.add_constraint("distance")
     c = w.sketch.constraints[-1]
     assert c.value == pytest.approx(50.8)

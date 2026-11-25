@@ -463,3 +463,86 @@ def test_click_elsewhere_puts_drawn_boxes_away(qapp, monkeypatch):
     QTest.mouseClick(w.view, Qt.LeftButton, Qt.NoModifier, QPoint(5, 5))
     assert not w.fields.active
     assert {(0, 0), (40, 0), (40, 25), (0, 25)} <= _points(w)
+
+
+# -- number fields in dialogs and toolbars
+def test_number_field_parses_units_maths_and_variables(qapp):
+    from rcad.value_box import NumberField
+    f = NumberField(10.0, "length", INCH, {"wall": 3.0})
+    assert f.text() == "0.3937 in" and f.value() == 10.0  # untouched: exact
+    f.setText("2")
+    assert f.value() == pytest.approx(50.8)
+    f.setText("1in + 5mm")
+    assert f.value() == pytest.approx(30.4)
+    f.setText("wall * 2")
+    assert f.value() == pytest.approx(6.0)
+    f.setText("2 +")
+    assert f.value() is None and not f.is_valid() and "border" in f.styleSheet()
+    assert f.last_valid == pytest.approx(6.0)
+
+
+def test_number_field_range_and_ok_button(qapp):
+    from PySide6.QtWidgets import QDialogButtonBox
+    from rcad.value_box import NumberField, bind_ok
+    f = NumberField(360.0, "angle", lo=1.0, hi=360.0)
+    assert f.text() == "360°"
+    box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+    bind_ok(box, [f])
+    ok = box.button(QDialogButtonBox.Ok)
+    assert ok.isEnabled()
+    f.setText("400")
+    assert f.value() is None and "At most 360°" in f.error() and not ok.isEnabled()
+    f.setText("360/4")
+    assert f.value() == pytest.approx(90.0) and ok.isEnabled()
+
+
+def test_ask_length_accepts_expressions(qapp, monkeypatch):
+    w = MainWindow()
+    w.doc.variables = {"wall": 2.0}
+
+    def exec_(self):
+        self.field.setText("wall * 3 + 1cm")
+        return True
+    monkeypatch.setattr(appmod.NumberDialog, "exec", exec_)
+    assert w.ask_length("t", "l", 5.0) == (pytest.approx(16.0), True)
+    monkeypatch.setattr(appmod.NumberDialog, "exec", lambda self: False)
+    assert w.ask_length("t", "l", 5.0) == (5.0, False)
+
+
+def test_extrude_and_revolve_dialogs_take_expressions(qapp):
+    w = MainWindow()
+    d = appmod.ExtrudeDialog(w, 10.0, variables={"h": 4.0})
+    d.dist.setText("h * 2.5")
+    assert d.distance_mm == pytest.approx(10.0)
+    d.dist.setText("-1in")
+    assert d.distance_mm == pytest.approx(-25.4)
+    r = appmod.RevolveDialog(w, variables={"a": 45.0})
+    r.angle.setText("a * 2")
+    assert r.angle.value() == pytest.approx(90.0)
+    r.angle.setText("0")
+    assert r.angle.value() is None  # below the 1° minimum
+
+
+def test_variables_dialog_values_take_expressions(qapp):
+    d = appmod.VariablesDialog(None, {"wall": 2.0})
+    d.name_edit.setText("depth")
+    d.value_edit.setText("wall * 5 + 1in")
+    d._add()
+    assert d.variables()["depth"] == pytest.approx(35.4)
+    d.name_edit.setText("bad name")
+    d.value_edit.setText("3")
+    d._add()
+    assert "bad name" not in d.variables()
+
+
+def test_snap_field_follows_units_and_takes_expressions(qapp):
+    w = MainWindow()
+    w.unit_combo.setCurrentText("in")
+    assert w.snap.text() == "0.05 in"
+    w.snap.setText("1/8")
+    assert w.snap.value() == pytest.approx(3.175)
+    w.snap.setText("1/")  # mid-edit: keep snapping to the last good value
+    w.new_sketch()
+    x, y = w.view.camera.project(np.array([(3.0, 3.3, 0)], float), w.view.width(), w.view.height())[0][:2]
+    _pi, uv = w._snap(x, y)
+    assert uv[0] == pytest.approx(3.175) and uv[1] == pytest.approx(3.175)

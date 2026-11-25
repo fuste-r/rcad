@@ -398,3 +398,106 @@ class FieldSet(QObject):
         self.active_index = index
         for i, key in enumerate(self.keys):
             self.boxes[key].set_lit(i == index if len(self.keys) > 1 else None)
+
+
+class NumberField(QLineEdit):
+    """Text field for a length (mm) or angle (degrees) in dialogs and toolbars.
+
+    Accepts the same input as the value boxes: units, arithmetic and variables.
+    ``value()`` returns mm or degrees, or None while the text is invalid or out of
+    range; untouched text returns the starting value exactly (no display rounding).
+    """
+
+    validity_changed = Signal(bool)
+    HINT = "Units (2in, 5cm), maths (40/3 + 2) and variables (wall * 2) work"
+
+    def __init__(self, value: float | None = None, quantity: str = "length", unit: Unit | None = None,
+                 variables: dict | None = None, lo: float | None = None, hi: float | None = None,
+                 parent=None, allow_empty: bool = False):
+        super().__init__(parent)
+        from .units import MM
+        self.allow_empty = allow_empty  # empty text is fine (value() is None) rather than an error
+        self.quantity = quantity
+        self.unit = unit or MM
+        self.variables = variables if variables is not None else {}
+        self.lo, self.hi = lo, hi
+        self._valid = True
+        self._orig = self._shown = None
+        self.last_valid = value
+        self.setToolTip(self.HINT)
+        self.textChanged.connect(self._check)
+        self.set_value(value)
+
+    def format(self, value: float) -> str:
+        return format_angle(value) if self.quantity == "angle" else self.unit.fmt(value)
+
+    def set_value(self, value: float | None):
+        self._orig = value
+        self._shown = "" if value is None else self.format(value)
+        self.setText(self._shown)
+        self._check()
+
+    def set_unit(self, unit: Unit):
+        """Show the same value in another display unit."""
+        v = self.value()
+        self.unit = unit
+        self.set_value(v if v is not None else self._orig)
+
+    def error(self) -> str | None:
+        """Why the text can't be used, or None if it can."""
+        text = self.text()
+        if self._orig is not None and text == self._shown:
+            return None
+        if self.allow_empty and not text.strip():
+            return None
+        try:
+            v = (parse_angle(text, self.variables) if self.quantity == "angle"
+                 else parse_length(text, self.unit, self.variables))
+        except ValueError as error:
+            return str(error)
+        if self.lo is not None and v < self.lo - 1e-9:
+            return f"At least {self.format(self.lo)}"
+        if self.hi is not None and v > self.hi + 1e-9:
+            return f"At most {self.format(self.hi)}"
+        return None
+
+    def value(self) -> float | None:
+        if self.error() is not None:
+            return None
+        text = self.text()
+        if self._orig is not None and text == self._shown:
+            return self._orig
+        if not text.strip():
+            return None
+        if self.quantity == "angle":
+            return parse_angle(text, self.variables)
+        return parse_length(text, self.unit, self.variables)
+
+    def is_valid(self) -> bool:
+        return self.error() is None
+
+    def _check(self, *_):
+        err = self.error()
+        if err is None:
+            v = self.value()
+            if v is not None:
+                self.last_valid = v
+        valid = err is None
+        self.setToolTip(self.HINT if valid else f"{err}\n{self.HINT}")
+        self.setStyleSheet("" if valid else "QLineEdit { border: 2px solid #ff4040; }")
+        if valid != self._valid:
+            self._valid = valid
+            self.validity_changed.emit(valid)
+
+
+def bind_ok(buttons, fields):
+    """Disable a dialog's OK button while any NumberField in ``fields`` is invalid."""
+    from PySide6.QtWidgets import QDialogButtonBox
+    ok = buttons.button(QDialogButtonBox.Ok)
+
+    def update(*_):
+        ok.setEnabled(all(f.is_valid() for f in fields))
+
+    for f in fields:
+        f.validity_changed.connect(update)
+    update()

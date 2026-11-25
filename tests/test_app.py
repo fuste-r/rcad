@@ -13,6 +13,15 @@ from rcad.kernel import Feature
 from rcad.sketch import Constraint, Sketch, SketchPlane, standard_plane
 
 
+
+def type_number(monkeypatch, text):
+    """Answer the next number dialogs by typing text (None: accept the shown value)."""
+    def exec_(self):
+        if text is not None:
+            self.field.setText(text)
+        return True
+    monkeypatch.setattr(appmod.NumberDialog, "exec", exec_)
+
 @pytest.fixture(scope="module")
 def qapp():
     return QApplication.instance() or QApplication([])
@@ -47,7 +56,7 @@ def test_full_workflow(qapp, monkeypatch, tmp_path):
     w.set_tool("select")
     click(w, (20, 0, 0))  # bottom edge
     assert w.view.sketch_sel == {("l", 0)}
-    monkeypatch.setattr(QInputDialog, "getDouble", lambda *a, **k: (50.0, True))
+    type_number(monkeypatch, "50.0")
     w.add_constraint("distance")
     assert sk.constraints[-1].kind == "distance"
     xs = sorted({round(p[0], 4) for p in sk.points})
@@ -55,7 +64,7 @@ def test_full_workflow(qapp, monkeypatch, tmp_path):
 
     # a conflicting dimension is rejected and rolled back
     n = len(sk.constraints)
-    monkeypatch.setattr(QInputDialog, "getDouble", lambda *a, **k: (60.0, True))
+    type_number(monkeypatch, "60.0")
     w.view.sketch_sel = {("l", 0)}
     w.add_constraint("distance")
     assert len(sk.constraints) == n
@@ -67,7 +76,7 @@ def test_full_workflow(qapp, monkeypatch, tmp_path):
     assert len(sk.circles) == 1
     w.set_tool("select")
     w.view.sketch_sel = {("c", 0)}
-    monkeypatch.setattr(QInputDialog, "getDouble", lambda *a, **k: (8.0, True))
+    type_number(monkeypatch, "8.0")
     w.add_constraint("diameter")
     assert sk.circles[0][1] == pytest.approx(4.0)
 
@@ -86,7 +95,7 @@ def test_full_workflow(qapp, monkeypatch, tmp_path):
     top = [i for i, f in enumerate(w.doc.mesh.faces) if f.normal is not None and f.normal[2] > 0.99]
     assert top
     w.view.sel_faces = {top[0]}
-    monkeypatch.setattr(QInputDialog, "getDouble", lambda *a, **k: (5.0, True))
+    type_number(monkeypatch, "5.0")
     w.pushpull()
     assert not w.doc.errors
     assert w.doc.part.volume == pytest.approx(vol + (50 * 30 - np.pi * 16) * 5, rel=1e-3)
@@ -95,7 +104,7 @@ def test_full_workflow(qapp, monkeypatch, tmp_path):
     edge = max(range(len(w.doc.mesh.edges)), key=lambda i: w.doc.mesh.edges[i].mid[2] + w.doc.mesh.edges[i].mid[0])
     w.view.sel_edges = {edge}
     before = w.doc.part.volume
-    monkeypatch.setattr(QInputDialog, "getDouble", lambda *a, **k: (1.0, True))
+    type_number(monkeypatch, "1.0")
     w.fillet()
     assert not w.doc.errors and w.doc.part.volume < before
 
