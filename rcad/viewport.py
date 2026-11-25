@@ -75,6 +75,7 @@ class Viewport(QOpenGLWidget):
         self.value_box.scrubbed.connect(self._on_box_scrubbed)
         self.value_box.scrub_finished.connect(self._on_box_scrub_finished)
         self.fields = None  # FieldSet for sketch drawing tools, set by the app
+        self.paint_hooks = []  # callables run after each paint to keep overlays beside the model
         self._value_post = None  # {"kind", "base", "dir", "value"} after a committed drag
 
     # -- data
@@ -902,6 +903,8 @@ class Viewport(QOpenGLWidget):
         self._sync_dim_labels()
         self._sync_value_box()
         self._sync_fields()
+        for hook in self.paint_hooks:
+            hook()
 
     def _sync_dim_labels(self):
         if self.sketch is None:

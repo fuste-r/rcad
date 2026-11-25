@@ -27,6 +27,7 @@ from .sketch import (
 from .units import MM, UNITS
 from .theme import CHOICES, apply_choice
 from .tool_bar import Choice, Number, ToolSettingsBar
+from .quick_buttons import QuickButtons
 from .tool_line import ToolLine
 from .value_box import FieldSet, NumberField
 from .viewport import Viewport
@@ -393,6 +394,12 @@ class MainWindow(QMainWindow):
 
         # a tool's settings bar takes the line's place while it is open
         self.tool_bar.active_changed.connect(line.set_suppressed)
+
+        # quick buttons beside the selection
+        self.quick = QuickButtons(self.view)
+        self._region_anchor = None  # world centre of the highlighted region (set in _update_regions)
+        self.view.paint_hooks.append(self._place_quick)
+        self.tool_bar.active_changed.connect(lambda _active: self._refresh_quick())
 
     # ---- units
     @property
@@ -893,11 +900,139 @@ class MainWindow(QMainWindow):
             if not shown:
                 continue
             chosen = f.sketch.selected_regions()
-            fills += [(f.sketch.region_triangles(r), (1.0, 0.55, 0.15, 0.45)) for r in sorted(chosen)]
+            chosen_fills = [f.sketch.region_triangles(r) for r in sorted(chosen)]
+            fills += [(t, (1.0, 0.55, 0.15, 0.45)) for t in chosen_fills]
+            if i == self.region_sketch and chosen_fills:
+                self._region_anchor = chosen_fills[0].reshape(-1, 3).mean(axis=0)
             if self.hover_region is not None and self.hover_region[0] == i and self.hover_region[1] not in chosen:
                 fills.append((f.sketch.region_triangles(self.hover_region[1]), (0.95, 0.9, 0.3, 0.35)))
         self.view.region_fill = fills
+        self._refresh_quick()
         self.view.update()
+
+    # ---- quick buttons beside the selection
+    CONSTRAINT_LABELS = {
+        "horizontal": "Horizontal", "vertical": "Vertical", "coincident": "Coincident", "parallel": "Parallel",
+        "perpendicular": "Perpendicular", "equal": "Equal", "distance": "Distance", "spacing": "Spacing",
+        "diameter": "Diameter", "expression": "Expression", "fixed": "Fixed", "point_on_line": "Point on line",
+    }
+
+    def _sketch_quick_kinds(self, pts, lines, circles) -> list[str]:
+        """Constraints that fit a sketch selection, likeliest first (same rules as add_constraint)."""
+        if lines and not pts and not circles:
+            if len(lines) == 1:
+                return ["distance", "horizontal", "vertical"]
+            if len(lines) == 2:
+                return ["parallel", "perpendicular", "equal", "spacing"]
+        if pts and not lines and not circles:
+            if len(pts) == 2:
+                return ["coincident", "distance", "horizontal", "vertical", "expression", "fixed"]
+            return ["fixed"]
+        if len(pts) == 1 and len(lines) == 1 and not circles:
+            return ["point_on_line"]
+        if len(circles) == 1 and not pts and not lines:
+            return ["diameter"]
+        return []
+
+    def _quick_spec(self):
+        """(key, world anchor, likeliest tools, more tools, delete tool) for the selection, or None."""
+        if self._session is not None or self.tool_bar.active:
+            return None
+        v = self.view
+        if self.mode == "sketch":
+            if self.tool != "select" or not v.sketch_sel or self.sketch is None:
+                return None
+            sk = self.sketch
+            sel = sorted(v.sketch_sel)
+            pts = [i for k, i in sel if k == "p"]
+            lines = [i for k, i in sel if k == "l"]
+            circles = [i for k, i in sel if k == "c"]
+            try:
+                uvs = [sk.points[i] for i in pts]
+                uvs += [np.mean([sk.points[a], sk.points[b]], axis=0) for a, b in (sk.lines[i] for i in lines)]
+                uvs += [sk.points[sk.circles[i][0]] for i in circles]
+            except IndexError:
+                return None
+            if not uvs:
+                return None
+            anchor = np.asarray(sk.plane.to3d(*np.mean(uvs, axis=0)), float)
+            tools = [(self.CONSTRAINT_LABELS[k], lambda k=k: self.add_constraint(k), f"Add a {k} constraint")
+                     for k in self._sketch_quick_kinds(pts, lines, circles)]
+            delete = ("🗑", self.delete_selection, "Delete the selected sketch items")
+            return ("sketch", tuple(sel)), anchor, tools[:2], tools[2:], delete
+        mesh = self.doc.mesh
+        if v.sel_edges and not v.sel_faces and mesh is not None:
+            edges = sorted(e for e in v.sel_edges if 0 <= e < len(mesh.edges))
+            if not edges:
+                return None
+            owners = {self._edge_owner(e) for e in edges}
+            delete = None
+            if len(owners) == 1 and None not in owners:
+                i = owners.pop()
+                delete = ("🗑", lambda i=i: self._delete_feature_at(i),
+                          f"Delete the {self.doc.features[i].kind} this edge belongs to")
+            tools = [("◐ Fillet", self.fillet, "Round the selected edges"),
+                     ("◺ Chamfer", self.chamfer, "Bevel the selected edges")]
+            return ("edges", tuple(edges)), np.asarray(mesh.edges[edges[0]].mid, float), tools, [], delete
+        if len(v.sel_faces) == 1 and not v.sel_edges and mesh is not None:
+            face = next(iter(v.sel_faces))
+            if not (0 <= face < len(mesh.faces)) or mesh.faces[face].normal is None:
+                return None
+            tools = [("✏️ Sketch", self._sketch_on_selected_face, "Start a sketch on this face"),
+                     ("↕️ Push/Pull", self.pushpull, "Move this face along its normal")]
+            return ("face", face), np.asarray(mesh.faces[face].center, float), tools, [], None
+        feats = self.doc.features
+        if (not v.sel_faces and not v.sel_edges and 0 <= self.region_sketch < len(feats)
+                and feats[self.region_sketch].kind == "sketch"
+                and feats[self.region_sketch].sketch.selected_regions() and self._region_anchor is not None):
+            chosen = tuple(sorted(feats[self.region_sketch].sketch.selected_regions()))
+            tools = [("⇈ Extrude", self.extrude, "Extrude the highlighted regions"),
+                     ("⟳ Revolve", self.revolve, "Revolve the highlighted regions")]
+            more = [("↝ Sweep", self.sweep, "Sweep this profile along another sketch"),
+                    ("⌁ Loft", self.loft, "Loft between sketch sections")]
+            return ("region", self.region_sketch, chosen), self._region_anchor, tools, more, None
+        return None
+
+    def _refresh_quick(self):
+        spec = self._quick_spec()
+        if spec is None:
+            self.quick.clear()
+            return
+        key, anchor, primary, more, delete = spec
+        self.quick.set_tools(key, anchor, primary, more, delete)
+        self._place_quick()
+
+    def _place_quick(self):
+        """Keep the quick buttons beside the selection; hidden while the mouse drags."""
+        q, v = self.quick, self.view
+        if q.anchor is None or not q.buttons:
+            q.hide()
+            return
+        if v._press is not None and v._dragged:
+            q.hide()
+            return
+        s = v.camera.project(np.asarray(q.anchor, float).reshape(1, 3), v.width(), v.height())[0]
+        if np.isnan(s[0]) or np.isnan(s[1]):
+            q.hide()
+            return
+        q.place(float(s[0]), float(s[1]))
+
+    def _edge_owner(self, edge: int) -> int | None:
+        """Index of the fillet (by its rounded edges) or fillet/chamfer (by its picked edges) an edge belongs to."""
+        i = self._find_fillet_by_edge(tuple(map(float, self.doc.mesh.edges[edge].mid)))
+        return i if i is not None else self._feature_for_edge(edge)
+
+    def _sketch_on_selected_face(self):
+        self.plane_combo.setCurrentText("Selected face")
+        self.new_sketch()
+
+    def _delete_feature_at(self, i: int):
+        if not 0 <= i < len(self.doc.features):
+            return
+        self._push_undo()
+        self.doc.delete(i)
+        self._clear_sketch_history()
+        self.rebuild()
 
     def _pick_region(self, x, y):
         """Visible-sketch region under the cursor and not hidden behind a model face: (feature, region, (u, v))."""

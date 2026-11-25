@@ -12,10 +12,10 @@
 
 ## P1: Interaction and sketching
 
-- [ ] Unify direct manipulation for extrude, push/pull, fillet, and chamfer with live previews and precise numeric entry; reduce the split between drag interactions and dialogs.
+- [x] Unify direct manipulation for extrude, push/pull, fillet, and chamfer with live previews and precise numeric entry; reduce the split between drag interactions and dialogs.
 - [ ] Add smart snapping and optional auto-constraints for endpoints, midpoints, centers, tangencies, and alignments.
 - [ ] Make displayed sketch dimensions editable on-canvas and open the corresponding constraint editor when selected.
-- [ ] Offer context-aware actions based on the current selection, and add direct drag editing for chamfer to complement the existing fillet interaction.
+- [x] Offer context-aware actions based on the current selection, and add direct drag editing for chamfer to complement the existing fillet interaction.
 - [ ] Add sketch arcs, trim/split/offset tools, construction geometry, and projected model edges. Support closed profiles that combine lines, arcs, and circles.
 - [ ] Add common sketch constraints such as angle, radius, tangent, and concentric, with solver status and expression support where applicable.
 
