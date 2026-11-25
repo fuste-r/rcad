@@ -207,3 +207,259 @@ def test_fillet_typed_then_enter_commits(qapp, monkeypatch):
     v.value_box.returnPressed.emit()
     assert f.value == pytest.approx(2.5) and not w.doc.errors
     assert v._value_post["value"] == pytest.approx(2.5)
+
+
+# -- angles
+@pytest.mark.parametrize("text, expected", [("90", 90.0), ("45°", 45.0), ("30 deg", 30.0),
+                                            ("180/4", 45.0), ("-15", -15.0)])
+def test_parse_angle(text, expected):
+    from rcad.value_box import parse_angle
+    assert parse_angle(text) == pytest.approx(expected)
+
+
+# -- scrubbing
+def test_scrub_steps_follow_units_and_modifiers(qapp, monkeypatch):
+    w = _box_model(monkeypatch)
+    box = w.view.value_box
+    box.setText("10")
+    box.begin_scrub(0)
+    assert box.scrub_to(25) == pytest.approx(12.5)        # 0.1 mm per pixel
+    assert box.scrub_to(25, Qt.ShiftModifier) == pytest.approx(10.25)
+    assert box.scrub_to(-3, Qt.ControlModifier) == pytest.approx(7.0)
+    w.view.unit = INCH
+    box.setText("1")
+    box.begin_scrub(0)
+    assert box.scrub_to(10) == pytest.approx(25.4 + 10 * 0.005 * 25.4)  # 0.005 in per pixel
+
+
+def test_tab_keeps_focus_in_a_lone_box(qapp, monkeypatch):
+    w = _box_model(monkeypatch)
+    assert w.view.value_box.focusNextPrevChild(True) is True
+    _start_extrude_drag(w)
+    assert w.view.focusNextPrevChild(True) is False  # Tab doesn't leave the view mid-drag
+
+
+def test_scrub_after_drag_edits_live_with_one_undo_step(qapp, monkeypatch):
+    w = _box_model(monkeypatch)
+    v = w.view
+    _start_extrude_drag(w)
+    v._finish_extrude()  # 3 mm push/pull
+    f = w.doc.features[-1]
+    depth = len(w._undo)
+    box = v.value_box
+    box.setText(box.format(3.0))
+    box.begin_scrub(0)
+    box.scrub_to(20)
+    assert f.value == pytest.approx(5.0)  # the model follows the scrub
+    box.scrub_to(40)
+    assert f.value == pytest.approx(7.0)
+    box.scrub_finished.emit(7.0)
+    assert f.value == pytest.approx(7.0) and not w.doc.errors
+    assert len(w._undo) == depth + 1
+    w.undo()
+    assert w.doc.features[-1].value == pytest.approx(3.0)
+
+
+def test_scrub_to_failing_fillet_reverts(qapp, monkeypatch):
+    w = _box_model(monkeypatch)
+    v = w.view
+    mids = [tuple(map(float, w.doc.mesh.edges[0].mid))]
+    v._fillet_state = {"mids": mids, "outward": None, "start_screen": (0, 0), "radius": 2.0}
+    v._dragged = True
+    v.fillet_preview.emit(2.0, mids)
+    v._finish_fillet()
+    f = w.doc.features[-1]
+    assert f.kind == "fillet" and w._value_feature is f
+    depth = len(w._undo)
+    box = v.value_box
+    box.setText(box.format(2.0))
+    box.begin_scrub(0)
+    box.scrub_to(9000)  # 902 mm: far too big
+    box.scrub_finished.emit(902.0)
+    assert f.value == pytest.approx(2.0) and not w.doc.errors
+    assert len(w._undo) == depth
+
+
+# -- sizes while drawing in a sketch
+def _sketch(monkeypatch, tool):
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
+    w = MainWindow()
+    w.view.resize(1000, 700)
+    w.new_sketch()
+    w.set_tool(tool)
+    return w
+
+
+def _click_at(w, p):
+    x, y = w.view.camera.project(np.array([p], float), 1000, 700)[0][:2]
+    w.on_click(x, y, Qt.LeftButton, Qt.NoModifier)
+    return x, y
+
+
+def _type(box, text):
+    box.setText(text)
+    box._on_text(text)
+
+
+def _tab(widget, back=False):
+    key = Qt.Key_Backtab if back else Qt.Key_Tab
+    mods = Qt.ShiftModifier if back else Qt.NoModifier
+    QApplication.sendEvent(widget, QKeyEvent(QKeyEvent.KeyPress, key, mods, "\t"))
+
+
+def _points(w):
+    return {tuple(round(c, 6) for c in p) for p in w.sketch.points}
+
+
+def test_rect_width_tab_height_enter(qapp, monkeypatch):
+    w = _sketch(monkeypatch, "rect")
+    _click_at(w, (0, 0, 0))
+    f = w.fields
+    assert f.active and f.keys == ["W", "H"] and f.active_index == 0
+    _key(w.view, "4")
+    _type(f.boxes["W"], "40")
+    _tab(w.view)  # from the view, or from the focused box: both move to H
+    assert f.active_index == 1
+    _type(f.boxes["H"], "25")
+    _tab(f.boxes["H"], back=True)
+    assert f.active_index == 0
+    f.boxes["W"].returnPressed.emit()
+    assert {(0, 0), (40, 0), (40, 25), (0, 25)} <= _points(w)
+    assert w.tool == "select"
+    assert f.active and f.post  # the boxes stay on the new rectangle
+
+
+def test_rect_typed_width_mouse_height(qapp, monkeypatch):
+    w = _sketch(monkeypatch, "rect")
+    _click_at(w, (0, 0, 0))
+    _key(w.view, "4")
+    _type(w.fields.boxes["W"], "40")
+    x, y = w.view.camera.project(np.array([(-10, -15, 0)], float), 1000, 700)[0][:2]
+    w.on_hover(x, y)
+    assert w.fields.boxes["H"].text() == "15 mm"  # the untyped size follows the mouse
+    assert w.fields.boxes["W"].text() == "40"
+    _click_at(w, (-10, -15, 0))
+    assert {(0, 0), (-40, 0), (-40, -15), (0, -15)} <= _points(w)  # typed width keeps the mouse's side
+
+
+def test_line_length_and_angle_then_next_segment(qapp, monkeypatch):
+    w = _sketch(monkeypatch, "line")
+    _click_at(w, (0, 0, 0))
+    _key(w.view, "3")
+    _type(w.fields.boxes["L"], "30")
+    _tab(w.view)
+    _type(w.fields.boxes["A"], "90")
+    w.fields.boxes["A"].returnPressed.emit()
+    assert (0, 30) in _points(w)
+    assert len(w.sketch.lines) == 1
+    # the chain goes on from the new point with nothing typed
+    assert w.pending is not None and w.fields.active
+    assert w.fields.locked("L") is None and w.fields.locked("A") is None
+    _key(w.view, "1")
+    _type(w.fields.boxes["L"], "10in/25.4")  # 10 mm, any expression works
+    w.view.keyPressEvent(QKeyEvent(QKeyEvent.KeyPress, Qt.Key_Return, Qt.NoModifier, "\r"))
+    assert (10, 30) in _points(w)  # angle 0 with no mouse move
+
+
+def test_circle_diameter(qapp, monkeypatch):
+    w = _sketch(monkeypatch, "circle")
+    _click_at(w, (5, 5, 0))
+    assert w.fields.keys == ["D"]
+    _key(w.view, "1")
+    _type(w.fields.boxes["D"], "12")
+    w.fields.boxes["D"].returnPressed.emit()
+    assert len(w.sketch.circles) == 1 and w.sketch.circles[0][1] == pytest.approx(6.0)
+
+
+def test_drawing_fields_invalid_and_escape(qapp, monkeypatch):
+    w = _sketch(monkeypatch, "rect")
+    _click_at(w, (0, 0, 0))
+    _key(w.view, "x")
+    w.fields.accept()  # an unparseable size blocks placing the shape
+    assert w.pending is not None and not w.sketch.lines
+    w.fields.boxes["W"].keyPressEvent(QKeyEvent(QKeyEvent.KeyPress, Qt.Key_Escape, Qt.NoModifier))
+    assert w.pending is None and not w.fields.active
+
+
+# -- boxes left on a shape after it is drawn
+def _draw_rect(w, size=(40, 25)):
+    _click_at(w, (0, 0, 0))
+    _key(w.view, "1")
+    _type(w.fields.boxes["W"], str(size[0]))
+    _tab(w.view)
+    _type(w.fields.boxes["H"], str(size[1]))
+    w.fields.boxes["H"].returnPressed.emit()
+
+
+def test_rect_boxes_stay_and_resize_it(qapp, monkeypatch):
+    w = _sketch(monkeypatch, "rect")
+    _draw_rect(w)
+    f = w.fields
+    assert f.post and f.anchor is not None
+    assert f.boxes["W"].text() == "40 mm" and f.boxes["H"].text() == "25 mm"
+    _tab(w.view)  # to H
+    _key(w.view, "1")
+    _type(f.boxes["H"], "10")
+    assert {(0, 0), (40, 0), (40, 10), (0, 10)} <= _points(w)  # follows the typing
+    f.boxes["H"].returnPressed.emit()
+    assert f.post and f.boxes["H"].text() == "10 mm"
+    w.undo_sketch()  # one undo step back to 25
+    assert {(0, 0), (40, 0), (40, 25), (0, 25)} <= _points(w)
+    assert not f.active
+
+
+def test_rect_box_scrub_resizes_live(qapp, monkeypatch):
+    w = _sketch(monkeypatch, "rect")
+    _draw_rect(w)
+    box = w.fields.boxes["W"]
+    box.begin_scrub(0)
+    box.scrub_to(50)  # +5 mm
+    assert (45, 25) in _points(w)
+    box.scrub_finished.emit(45.0)
+    assert (45, 25) in _points(w)
+
+
+def test_circle_box_stays_and_resizes(qapp, monkeypatch):
+    w = _sketch(monkeypatch, "circle")
+    _click_at(w, (5, 5, 0))
+    _key(w.view, "1")
+    _type(w.fields.boxes["D"], "12")
+    w.fields.boxes["D"].returnPressed.emit()
+    assert w.fields.post and w.fields.boxes["D"].text() == "12 mm"
+    _key(w.view, "2")
+    _type(w.fields.boxes["D"], "20")
+    w.fields.boxes["D"].returnPressed.emit()
+    assert w.sketch.circles[0][1] == pytest.approx(10.0)
+
+
+def test_line_chain_esc_keeps_last_segment_boxes(qapp, monkeypatch):
+    w = _sketch(monkeypatch, "line")
+    _click_at(w, (0, 0, 0))
+    _click_at(w, (20, 0, 0))
+    w.cancel()  # Esc ends the chain
+    f = w.fields
+    assert f.post and f.boxes["L"].text() == "20 mm" and f.boxes["A"].text() == "0°"
+    _key(w.view, "3")
+    _type(f.boxes["L"], "35")
+    f.boxes["L"].returnPressed.emit()
+    assert (35, 0) in _points(w) and (20, 0) not in _points(w)
+    w.cancel()  # Esc again leaves the line tool and puts the boxes away
+    assert not f.active and w.tool == "select"
+
+
+def test_line_closing_on_existing_point_has_no_boxes(qapp, monkeypatch):
+    w = _sketch(monkeypatch, "line")
+    for p in [(0, 0, 0), (20, 0, 0), (20, 20, 0), (0, 0, 0)]:
+        _click_at(w, p)
+    assert w.pending is None and not w.fields.active
+
+
+def test_click_elsewhere_puts_drawn_boxes_away(qapp, monkeypatch):
+    from PySide6.QtCore import QPoint
+    from PySide6.QtTest import QTest
+    w = _sketch(monkeypatch, "rect")
+    _draw_rect(w)
+    assert w.fields.post
+    QTest.mouseClick(w.view, Qt.LeftButton, Qt.NoModifier, QPoint(5, 5))
+    assert not w.fields.active
+    assert {(0, 0), (40, 0), (40, 25), (0, 25)} <= _points(w)

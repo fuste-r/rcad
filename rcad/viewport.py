@@ -28,6 +28,7 @@ class Viewport(QOpenGLWidget):
     fillet_preview = Signal(float, list)  # live radius_mm, [edge midpoints]
     fillet_cancel = Signal()  # Esc during a drag: undo the live fillet
     value_edit = Signal(str, float)  # kind ("extrude"|"fillet"), new mm typed after the drag
+    value_scrub = Signal(str, float)  # kind, live mm while the box left after a drag is scrubbed
 
     def __init__(self):
         super().__init__()
@@ -71,6 +72,9 @@ class Viewport(QOpenGLWidget):
         self.value_box.edited.connect(self._on_box_edited)
         self.value_box.accepted.connect(self._on_box_accepted)
         self.value_box.cancelled.connect(self._on_box_cancelled)
+        self.value_box.scrubbed.connect(self._on_box_scrubbed)
+        self.value_box.scrub_finished.connect(self._on_box_scrub_finished)
+        self.fields = None  # FieldSet for sketch drawing tools, set by the app
         self._value_post = None  # {"kind", "base", "dir", "value"} after a committed drag
 
     # -- data
@@ -549,6 +553,8 @@ class Viewport(QOpenGLWidget):
     def mousePressEvent(self, e):
         p = e.position()
         self.setFocus()
+        if self.fields is not None and self.fields.post:
+            self.fields.stop()  # a click elsewhere puts away the boxes of the shape just drawn
         if self._typed_live() is not None:
             # A typed value is waiting for Enter: a click on the model confirms it.
             v = self.value_box.value()
@@ -725,8 +731,34 @@ class Viewport(QOpenGLWidget):
         box.show()
         box.raise_()
 
+    def focusNextPrevChild(self, forward):
+        # Tab moves between value boxes, never out of the view while one is up.
+        if (self.fields is not None and self.fields.active) or self._value_info() is not None:
+            return False
+        return super().focusNextPrevChild(forward)
+
+    def _sync_fields(self):
+        """Keep the boxes of a just-drawn shape next to it as the view moves."""
+        f = self.fields
+        if f is None or not f.active or not f.post or f.anchor is None:
+            return
+        s = self.camera.project(np.asarray(f.anchor, float).reshape(1, 3), self.width(), self.height())[0]
+        if not (np.isnan(s[0]) or np.isnan(s[1])):
+            f.place(float(s[0]), float(s[1]))
+
     def keyPressEvent(self, e):
         text = e.text()
+        f = self.fields
+        if f is not None and f.active and not e.modifiers() & (Qt.ControlModifier | Qt.AltModifier):
+            if e.key() in (Qt.Key_Tab, Qt.Key_Backtab):
+                f.next(e.key() == Qt.Key_Tab and not e.modifiers() & Qt.ShiftModifier)
+                return
+            if e.key() in (Qt.Key_Return, Qt.Key_Enter):
+                f.accept()
+                return
+            if text and text.isprintable() and not text.isspace():
+                f.type_char(text)
+                return
         if (self._value_info() is not None and text and text.isprintable() and not text.isspace()
                 and not e.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)):
             if self._extrude_state is not None:
@@ -762,6 +794,22 @@ class Viewport(QOpenGLWidget):
         self.value_box.end_typing()
         self.setFocus()
         self.update()
+
+    def _on_box_scrubbed(self, mm: float):
+        if self._typed_live() is not None:
+            self._on_box_edited(mm)
+        elif self._value_post is not None:
+            self._value_post["value"] = mm
+            self.value_scrub.emit(self._value_post["kind"], mm)
+            self.update()
+
+    def _on_box_scrub_finished(self, mm: float):
+        if self._typed_live() is None and self._value_post is not None:
+            self._value_post["value"] = mm
+            self.value_edit.emit(self._value_post["kind"], mm)
+            self.value_box.end_typing()
+            self.setFocus()
+            self.update()
 
     def _on_box_cancelled(self):
         if self._extrude_state is not None:
@@ -839,6 +887,7 @@ class Viewport(QOpenGLWidget):
         super().paintEvent(e)
         self._sync_dim_labels()
         self._sync_value_box()
+        self._sync_fields()
 
     def _sync_dim_labels(self):
         if self.sketch is None:

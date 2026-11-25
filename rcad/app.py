@@ -26,6 +26,7 @@ from .sketch import (
 )
 from .units import MM, UNITS
 from .theme import CHOICES, apply_choice
+from .value_box import FieldSet
 from .viewport import Viewport
 
 FILE_FILTER = "rCad project (*.rcad)"
@@ -274,7 +275,18 @@ class MainWindow(QMainWindow):
         self.view.fillet_cancel.connect(self.on_fillet_cancel)
         self.view.value_edit.connect(self.on_value_edit)
         self.view.variables_source = lambda: self.doc.variables
+        self.view.value_scrub.connect(self.on_value_scrub)
         self._value_feature = None  # feature made by the last drag; its value box can retype it
+        self._scrub_prev = None  # (feature, value before the scrub) while its value box is scrubbed
+        # Sizes typed while drawing in a sketch (rectangle W/H, line length/angle, circle Ø)
+        self.fields = FieldSet(self.view, lambda: self.unit, lambda: self.doc.variables)
+        self.view.fields = self.fields
+        self.fields.changed.connect(self._on_fields_changed)
+        self.fields.accepted.connect(self._on_fields_accepted)
+        self.fields.cancelled.connect(self.cancel)
+        self._draw_mouse = None  # (snapped point index, (u, v), x, y) of the last drawing hover
+        self._drawn = None  # shape just drawn whose size boxes stay on it (see _show_drawn)
+        self._last_segment = None  # (start, end) points of the last line drawn in the current chain
         self.view.sketch_mouse.connect(self.on_sketch_mouse)
 
         self.features = QListWidget()
@@ -500,6 +512,7 @@ class MainWindow(QMainWindow):
 
     # ---- state / refresh
     def set_mode(self, mode):
+        self.fields.stop()
         self.mode = mode
         sketching = mode == "sketch"
         self.model_tb.setVisible(not sketching)
@@ -586,6 +599,7 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def undo_sketch(self):
+        self.fields.stop()  # the shape the boxes were on may be gone
         history = self._sketch_undo.get(self.sketch_index, [])
         if not history:
             return False
@@ -596,6 +610,7 @@ class MainWindow(QMainWindow):
         return True
 
     def redo_sketch(self):
+        self.fields.stop()
         history = self._sketch_redo.get(self.sketch_index, [])
         if not history:
             return False
@@ -713,6 +728,7 @@ class MainWindow(QMainWindow):
         self.tool_actions[name].setChecked(True)
         self.tool = name
         self.pending = None
+        self.fields.stop()
         self.hover_region = None
         self.view.preview = []
         self.view.sketch_sel.clear()
@@ -722,7 +738,9 @@ class MainWindow(QMainWindow):
         if self.mode == "sketch" and self.pending is None and self.tool != "select":
             self.set_tool("select")  # Esc with nothing in progress leaves the drawing tool
             return
+        ending_chain = self.mode == "sketch" and self.tool == "line" and self.pending is not None
         self.pending = None
+        self.fields.stop()
         self.view.preview = []
         self.view.sketch_sel.clear()
         self.view.sel_faces.clear()
@@ -741,6 +759,8 @@ class MainWindow(QMainWindow):
             self._sketch_press_hit = None
             self._sketch_drag_orig = None
             self._solve_sketch()
+        if ending_chain:  # Esc ends a line chain: keep the last segment's sizes on it
+            self._show_last_segment()
         self._update_regions()
 
     # -- sketch drag
@@ -985,10 +1005,199 @@ class MainWindow(QMainWindow):
         snap = self._snap(x, y)
         if snap is None:
             return
-        pi, uv = snap
+        self._draw_at(*snap)
+
+    # ---- sizes typed while drawing
+    FIELD_SPECS = {
+        "line": [("L", "L", "length"), ("A", "∠", "angle")],
+        "rect": [("W", "W", "length"), ("H", "H", "length")],
+        "circle": [("D", "Ø", "length")],
+    }
+
+    def _apply_locks(self, p0, uv):
+        """Move the cursor point so the shape from p0 has the sizes typed into the fields."""
+        f = self.fields
+        du, dv = uv[0] - p0[0], uv[1] - p0[1]
+        if self.tool == "line":
+            length, angle = f.locked("L"), f.locked("A")
+            if length is None and angle is None:
+                return uv
+            length = abs(length) if length is not None else math.hypot(du, dv)
+            a = math.radians(angle) if angle is not None else (math.atan2(dv, du) if (du or dv) else 0.0)
+            return p0[0] + length * math.cos(a), p0[1] + length * math.sin(a)
+        if self.tool == "rect":
+            w, h = f.locked("W"), f.locked("H")
+            if w is not None:
+                du = w if w < 0 else math.copysign(w, du)
+            if h is not None:
+                dv = h if h < 0 else math.copysign(h, dv)
+            return p0[0] + du, p0[1] + dv
+        if self.tool == "circle":
+            d = f.locked("D")
+            if d is None:
+                return uv
+            n = math.hypot(du, dv)
+            ux, uy = (du / n, dv / n) if n > 1e-12 else (1.0, 0.0)
+            return p0[0] + abs(d) / 2 * ux, p0[1] + abs(d) / 2 * uy
+        return uv
+
+    def _field_values(self, p0, uv) -> dict:
+        du, dv = uv[0] - p0[0], uv[1] - p0[1]
+        if self.tool == "line":
+            return {"L": math.hypot(du, dv), "A": math.degrees(math.atan2(dv, du)) if (du or dv) else 0.0}
+        if self.tool == "rect":
+            return {"W": abs(du), "H": abs(dv)}
+        if self.tool == "circle":
+            return {"D": 2 * math.hypot(du, dv)}
+        return {}
+
+    # -- boxes left on a shape after it is drawn
+    def _show_drawn(self, drawn: dict):
+        """Keep the size boxes on the shape just drawn so it can be resized by typing or scrubbing.
+
+        drawn: {"tool": "rect", "pts": [4 point indices]} | {"tool": "circle", "circle": index}
+               | {"tool": "line", "a": start point, "b": end point}
+        """
+        self._drawn = dict(drawn, undo=False)
+        self.fields.start(self.FIELD_SPECS[drawn["tool"]], post=True)
+        self._refresh_drawn_fields()
+
+    def _drawn_ok(self) -> bool:
+        d = self._drawn
+        if d is None or not self.fields.post or self.mode != "sketch":
+            return False
+        sk = self.sketch
+        if d["tool"] == "rect":
+            return all(i < len(sk.points) for i in d["pts"])
+        if d["tool"] == "circle":
+            return d["circle"] < len(sk.circles)
+        return max(d["a"], d["b"]) < len(sk.points)
+
+    def _drawn_geometry(self):
+        """(start uv, end uv) for rect (opposite corners) / line, or (center uv, radius) for circle."""
+        d, sk = self._drawn, self.sketch
+        if d["tool"] == "rect":
+            return tuple(sk.points[d["pts"][0]]), tuple(sk.points[d["pts"][2]])
+        if d["tool"] == "circle":
+            c, r = sk.circles[d["circle"]]
+            return tuple(sk.points[c]), r
+        return tuple(sk.points[d["a"]]), tuple(sk.points[d["b"]])
+
+    def _refresh_drawn_fields(self):
+        d = self._drawn
+        p0, end = self._drawn_geometry()
+        if d["tool"] == "circle":
+            self.fields.set_values({"D": 2 * end})
+            anchor = (p0[0] + end, p0[1])
+        else:
+            tool, self.tool = self.tool, d["tool"]  # _field_values reads the tool
+            self.fields.set_values(self._field_values(p0, end))
+            self.tool = tool
+            anchor = end
+        self.fields.anchor = self.sketch.plane.to3d(*anchor)
+        self.view.update()
+
+    def _apply_drawn(self):
+        """Resize the shape just drawn to the sizes typed or scrubbed into its boxes."""
+        if not self._drawn_ok():
+            return
+        d, sk, f = self._drawn, self.sketch, self.fields
+        p0, end = self._drawn_geometry()
+        if d["tool"] == "rect":
+            du, dv = end[0] - p0[0], end[1] - p0[1]
+            w, h = f.locked("W"), f.locked("H")
+            if w is not None:
+                du = w if w < 0 else math.copysign(w, du)
+            if h is not None:
+                dv = h if h < 0 else math.copysign(h, dv)
+            if abs(du) < 1e-9 or abs(dv) < 1e-9:
+                return
+            u1, v1 = p0[0] + du, p0[1] + dv
+            new = {d["pts"][1]: [u1, p0[1]], d["pts"][2]: [u1, v1], d["pts"][3]: [p0[0], v1]}
+        elif d["tool"] == "circle":
+            dia = f.locked("D")
+            if dia is None or abs(dia) < 1e-9:
+                return
+            new = None
+        else:
+            length, angle = f.locked("L"), f.locked("A")
+            du, dv = end[0] - p0[0], end[1] - p0[1]
+            length = abs(length) if length is not None else math.hypot(du, dv)
+            a = math.radians(angle) if angle is not None else math.atan2(dv, du)
+            if length < 1e-9:
+                return
+            new = {d["b"]: [p0[0] + length * math.cos(a), p0[1] + length * math.sin(a)]}
+        if not d["undo"]:  # one undo step per editing session
+            self._push_sketch_undo()
+            d["undo"] = True
+        if new is None:
+            c, _r = sk.circles[d["circle"]]
+            sk.circles[d["circle"]] = (c, abs(dia) / 2)
+        else:
+            for i, uv in new.items():
+                sk.points[i] = uv
+        sk.version += 1
+        self._solve_sketch()
+        self._refresh_drawn_fields()
+
+    def _show_last_segment(self):
+        """At the end of a line chain, keep the last segment's boxes if its end point is free."""
+        seg, self._last_segment = self._last_segment, None
+        if seg is None or self.mode != "sketch":
+            return
+        a, b = seg
+        if b >= len(self.sketch.points) or sum(b in ln for ln in self.sketch.lines) != 1:
+            return  # closing onto other geometry: resizing would drag that along
+        self._show_drawn({"tool": "line", "a": a, "b": b})
+
+    def _start_fields(self):
+        self._drawn = None
+        specs = self.FIELD_SPECS.get(self.tool)
+        if specs and self.pending is not None:
+            self.fields.start(specs)
+            self._draw_mouse = None
+        else:
+            self.fields.stop()
+
+    def _on_fields_changed(self):
+        if self.fields.post:
+            self._apply_drawn()  # the shape follows typing and scrubbing
+            return
+        if self._draw_mouse is not None:
+            self._update_preview(*self._draw_mouse[2:])
+        elif self.pending is not None:
+            self._show_draw_preview(self.pending[1], None, None)
+
+    def _on_fields_accepted(self):
+        """Enter in a drawing value box: place the shape at the typed sizes."""
+        if self.fields.post:
+            self._apply_drawn()
+            if self._drawn is not None:
+                self._drawn["undo"] = False  # the next edit is a new undo step
+            self.fields.end_typing()
+            if self._drawn_ok():
+                self._refresh_drawn_fields()
+            self.view.setFocus()
+            return
+        if self.mode != "sketch" or self.pending is None:
+            return
+        pi, uv = (self._draw_mouse[:2] if self._draw_mouse is not None else (None, self.pending[1]))
+        self._push_sketch_undo()
+        self._draw_at(pi, uv)
+        self.view.setFocus()
+
+    def _draw_at(self, pi, uv):
+        """Place the next point of the active drawing tool at uv (pi: existing point there)."""
+        sk = self.sketch
+        if self.pending is not None and self.fields.active:
+            fixed = self._apply_locks(self.pending[1], uv)
+            if math.dist(fixed, uv) > 1e-9:
+                pi, uv = None, fixed
         if self.tool == "line":
             if self.pending is None:
                 self.pending = (pi, uv)
+                self._last_segment = None
+                self._start_fields()
                 return
             a_idx, a_uv = self.pending
             if a_idx is None and pi is None and math.dist(a_uv, uv) < 1e-9:
@@ -998,40 +1207,65 @@ class MainWindow(QMainWindow):
             if a != b:
                 sk.add_line(a, b)
                 sk.version += 1
+                self._last_segment = (a, b)
             self.pending = (b, tuple(sk.points[b])) if pi is None else None
+            self._start_fields()  # the next segment starts with nothing typed
             self._solve_sketch()
+            if self.pending is None:  # the chain ended on an existing point
+                self._show_last_segment()
         elif self.tool == "rect":
             if self.pending is None:
                 self.pending = (pi, uv)
+                self._start_fields()
                 return
             (u0, v0), (u1, v1) = self.pending[1], uv
             if abs(u1 - u0) > 1e-9 and abs(v1 - v0) > 1e-9:
                 sk.add_rect(u0, v0, u1, v1)
                 sk.version += 1
                 self._solve_sketch()
-            self.set_tool("select")  # so the new region can be highlighted right away
+                n = len(sk.points)
+                self.set_tool("select")  # so the new region can be highlighted right away
+                self._show_drawn({"tool": "rect", "pts": list(range(n - 4, n))})
+            else:
+                self.set_tool("select")
         elif self.tool == "circle":
             if self.pending is None:
                 self.pending = (pi, uv)
+                self._start_fields()
                 return
             c_idx, c_uv = self.pending
             r = math.dist(c_uv, uv)
             if r > 1e-9:
                 c = c_idx if c_idx is not None else sk.add_point(*c_uv)
-                sk.add_circle(c, r)
+                ci = sk.add_circle(c, r)
                 sk.version += 1
                 self._solve_sketch()
-            self.set_tool("select")
+                self.set_tool("select")
+                self._show_drawn({"tool": "circle", "circle": ci})
+            else:
+                self.set_tool("select")
 
     def _update_preview(self, x, y):
-        pl = self.sketch.plane
         snap = self._snap(x, y)
-        self.view.preview = []
         if snap is None or self.pending is None:
+            self.view.preview = []
             self.view.update()
             return
-        uv = snap[1]
+        self._draw_mouse = (snap[0], snap[1], x, y)
+        self._show_draw_preview(snap[1], x, y)
+
+    def _show_draw_preview(self, uv, x, y):
+        """Rubber-band the shape from the pending point to uv (after typed sizes) and show its sizes."""
+        pl = self.sketch.plane
         p0 = self.pending[1]
+        if self.fields.active:
+            uv = self._apply_locks(p0, uv)
+            self.fields.set_values(self._field_values(p0, uv))
+            if x is None:  # no hover yet: put the boxes by the pending point
+                x, y = self.view.camera.project(np.array([pl.to3d(*p0)], float),
+                                                self.view.width(), self.view.height())[0][:2]
+            self.fields.place(x, y)
+        self.view.preview = []
         if self.tool == "line":
             self.view.preview = [np.array([pl.to3d(*p0), pl.to3d(*uv)])]
         elif self.tool == "rect":
@@ -1457,12 +1691,21 @@ class MainWindow(QMainWindow):
             self._value_feature = None  # gone (undo, delete, reload): nothing to edit
             self.view.dismiss_value_box()
             return
+        scrub, self._scrub_prev = self._scrub_prev, None
+        if scrub is not None and scrub[0] is not f:
+            scrub = None
+        prev = scrub[1] if scrub is not None else f.value
         if (kind == "fillet" and value <= 1e-4) or abs(value) < 0.01:
             self.statusBar().showMessage("Value too small", 5000)
+            if scrub is not None:  # put back the size from before the scrub
+                f.value = prev
+                f.version += 1
+                self._undo.pop()
+                self.rebuild()
             self.view.set_post_value(f.value)
             return
-        prev = f.value
-        self._push_undo()
+        if scrub is None:  # a scrub already saved the undo snapshot
+            self._push_undo()
         f.value = float(value)
         f.version += 1
         self.rebuild()
@@ -1477,6 +1720,21 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Operation failed", msg)
         if f.kind == "fillet":
             f.result_edges = self._fillet_result_edges(f)
+
+    def on_value_scrub(self, kind: str, value: float):
+        """Live size while the value box left after a drag is scrubbed; on_value_edit finishes it."""
+        f = self._value_feature
+        expected = {"extrude": "pushpull", "fillet": "fillet"}.get(kind)
+        if f is None or f.kind != expected or not any(x is f for x in self.doc.features):
+            return
+        if (kind == "fillet" and value <= 1e-4) or abs(value) < 0.01:
+            return
+        if self._scrub_prev is None or self._scrub_prev[0] is not f:
+            self._scrub_prev = (f, f.value)
+            self._push_undo()
+        f.value = float(value)
+        f.version += 1
+        self.rebuild()
 
     def on_fillet_cancel(self):
         """Esc during a fillet drag: put the history back as it was before the drag."""
