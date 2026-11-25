@@ -199,14 +199,16 @@ def _find_edge(part: Shape, mid, tol=1e-3):
     return best
 
 
-def _is_seam(part: Shape, e) -> bool:
-    """True when the edge is a seam: both sides are the same (or parallel) surface,
-    e.g. the seam of an extruded cylinder — a fillet/chamfer cannot round it."""
-    faces = [f for f in part.faces() if e in f.edges()]
+def _is_seam(topo: refs.Topology, e) -> bool:
+    """True when the edge has no corner to round: a seam (the same surface on both sides,
+    e.g. down the side of an extruded cylinder) or a smooth join (the faces meet
+    tangentially, e.g. where an earlier fillet meets a flat face)."""
+    faces = topo.faces_of(e)
     if len(faces) < 2:
         return True
-    d = abs(float(np.dot(_vec(faces[0].normal_at()), _vec(faces[1].normal_at()))))
-    return d > 1 - 1e-6
+    mid = e @ 0.5
+    n0, n1 = (np.asarray(refs._normal_at(f, mid)) for f in faces[:2])
+    return abs(float(np.dot(n0, n1))) > 1 - 1e-6
 
 
 @dataclass
@@ -360,6 +362,9 @@ class Document:
                 raise ValueError("nothing to modify")
             if not f.edges:
                 raise ValueError("no edges picked")
+            size = "radius" if f.kind == "fillet" else "length"
+            if not f.value > 0:
+                raise ValueError(f"{f.kind} {size} must be greater than zero")
             topo = refs.Topology(part)
             edges = []
             for k, m in enumerate(f.edges):
@@ -375,19 +380,22 @@ class Document:
             f.edge_refs = [refs.edge_path(e) for e in edges]
             if f.kind == "fillet":
                 f.edge_dirs = [None if sig["dir"] is None else tuple(sig["dir"]) for sig in f.ref_sigs]
-            corners = [e for e in edges if not _is_seam(part, e)]
+            corners = [e for e in edges if not _is_seam(topo, e)]
             if not corners:
-                raise ValueError("picked edge is a seam (same surface on both sides) — cannot be rounded")
+                raise ValueError("picked edge is a seam or a smooth join (no corner) — cannot be rounded")
             solids = part.solids()
             modified: list[Solid] = []
             for s in solids:
                 s_edges = [e for e in corners if e in s.edges()]
                 if not s_edges:
                     modified.append(s)
-                elif f.kind == "fillet":
-                    modified.append(s.fillet(f.value, s_edges))
-                else:
-                    modified.append(s.chamfer(f.value, None, s_edges))
+                    continue
+                try:
+                    modified.append(s.fillet(f.value, s_edges) if f.kind == "fillet"
+                                    else s.chamfer(f.value, None, s_edges))
+                except Exception as e:  # build123d's own message names its API (max_fillet())
+                    raise ValueError(f"{f.kind} {size} is too large for the picked edges "
+                                     f"or the shape around them") from e
             # Multi-solid parts (e.g. a disconnected model) keep every modified
             # body; fuse into one Part rather than the old Solid(...) container.
             return modified[0] if len(modified) == 1 else modified[0].fuse(*modified[1:]).clean()

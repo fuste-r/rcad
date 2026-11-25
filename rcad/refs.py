@@ -11,7 +11,9 @@ faces around it. On rebuild the reference is found again in the new part:
 3. a candidate only counts if it is *local*: the old position, projected onto the
    candidate's plane (for an edge: onto each flat face beside it), lands on it.
    That holds when a face grows or moves along its normal (a height or width
-   change), and fails for a look-alike face or edge somewhere else;
+   change), and fails for a look-alike face or edge somewhere else. A circle is
+   local when its old centre lies inside the new circle, so a hole or boss can
+   move, grow or shrink by less than its own radius;
 4. if nothing fits, or two candidates fit about equally well, the feature fails
    with a message saying so, instead of silently using a different face or edge.
 
@@ -105,15 +107,25 @@ def face_signature(topo: Topology, face) -> dict:
 def edge_signature(topo: Topology, edge) -> dict:
     mid = edge @ 0.5
     d = _line_dir(edge)
-    radius = None
-    if edge.geom_type == GeomType.CIRCLE:
-        try:
-            radius = float(edge.radius)
-        except Exception:
-            radius = None
-    return {"kind": "edge", "type": edge.geom_type.name, "mid": _vec(mid).tolist(),
-            "dir": None if d is None else d.tolist(), "length": float(edge.length), "radius": radius,
-            "faces": [_normal_at(f, mid) for f in topo.faces_of(edge)]}
+    sig = {"kind": "edge", "type": edge.geom_type.name, "mid": _vec(mid).tolist(),
+           "dir": None if d is None else d.tolist(), "length": float(edge.length), "radius": None,
+           "faces": [_normal_at(f, mid) for f in topo.faces_of(edge)]}
+    circle = _circle(edge)
+    if circle is not None:
+        sig["center"], sig["axis"], sig["radius"] = circle[0].tolist(), circle[1].tolist(), circle[2]
+    return sig
+
+
+def _circle(edge):
+    """(centre, unit axis, radius) of a circular edge (full circle or arc), else None."""
+    if edge.geom_type != GeomType.CIRCLE:
+        return None
+    try:
+        ax = edge.arc_center, edge.normal(), float(edge.radius)
+    except Exception:
+        return None
+    a = _vec(ax[1])
+    return _vec(ax[0]), a / max(float(np.linalg.norm(a)), 1e-12), ax[2]
 
 
 def edge_path(edge) -> list[tuple]:
@@ -179,6 +191,9 @@ def resolve_edge(topo: Topology, sig: dict, what: str = "its edge"):
     m0 = np.asarray(sig["mid"], float)
     etype = sig.get("type")
     d0 = None if sig.get("dir") is None else np.asarray(sig["dir"], float)
+    # a circle is placed by its centre: the midpoint sits wherever the seam puts it on the rim
+    c0 = None if sig.get("center") is None else np.asarray(sig["center"], float)
+    a0 = None if sig.get("axis") is None else np.asarray(sig["axis"], float)
     cands = []
     for e in topo.edges:
         if etype is not None and e.geom_type.name != etype:
@@ -190,18 +205,28 @@ def resolve_edge(topo: Topology, sig: dict, what: str = "its edge"):
             d = _line_dir(e)
             if d is None or abs(float(np.dot(d, d0))) < 0.999:
                 continue  # a straight edge keeps its direction
-        s = float(np.linalg.norm(mid - m0)) / topo.scale + 0.5 * _ratio(e.length, sig.get("length"))
-        if sig.get("radius") is not None and e.geom_type == GeomType.CIRCLE:
-            try:
-                s += 0.5 * _ratio(float(e.radius), sig["radius"])
-            except Exception:
-                pass
-        cands.append((s, e))
+        circle = _circle(e) if c0 is not None else None
+        if circle is not None:
+            if a0 is not None and abs(float(np.dot(circle[1], a0))) < 0.999:
+                continue  # a circle keeps its axis direction
+            moved = float(np.linalg.norm(circle[0] - c0))
+        else:
+            moved = float(np.linalg.norm(mid - m0))
+        s = moved / topo.scale + 0.5 * _ratio(e.length, sig.get("length"))
+        if circle is not None:
+            s += 0.5 * _ratio(circle[2], sig.get("radius"))
+        cands.append((s, e, circle))
     cands.sort(key=lambda t: t[0])
     scored = []
-    for s, e in cands[:PRESELECT]:
+    for s, e, circle in cands[:PRESELECT]:
         faces = topo.faces_of(e)
-        if not all(_on_plane_face(f, m0, topo.tol) for f in faces if f.geom_type == GeomType.PLANE):
+        if circle is not None:
+            # local: the old centre, slid along the axis onto the new circle's plane, is inside it
+            off = c0 - circle[0]
+            off -= float(np.dot(off, circle[1])) * circle[1]
+            if float(np.linalg.norm(off)) > max(circle[2], float(sig.get("radius") or 0.0)) + topo.tol:
+                continue  # a look-alike hole or rim elsewhere
+        elif not all(_on_plane_face(f, m0, topo.tol) for f in faces if f.geom_type == GeomType.PLANE):
             continue  # a look-alike elsewhere, not this edge moved or resized
         if sig.get("faces"):
             mid = e @ 0.5

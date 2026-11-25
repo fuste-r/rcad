@@ -8,7 +8,7 @@
 - [x] Fix fillet result-edge ownership for circular and mixed edge selections. Keep metadata associated with each selected edge instead of relying on a shortened parallel direction list. Verify multiple fillets remain independently editable after rebuild and save/load.
 - [x] Replace midpoint-only face and edge references with stable references or deterministic geometric signatures. When an upstream edit removes or makes a reference ambiguous, report which feature needs repair instead of silently binding to a different entity.
 - [x] Format live extrude and fillet labels in the selected display units, matching sketch dimensions and dialogs.
-- [ ] Expand edge-operation regression coverage: circular edges, mixed circular and straight selections, seams, disconnected solids, invalid radii, edits to earlier features, undo/redo, and save/load.
+- [x] Expand edge-operation regression coverage: circular edges, mixed circular and straight selections, seams, disconnected solids, invalid radii, edits to earlier features, undo/redo, and save/load.
 
 ## P1: Interaction and sketching
 
