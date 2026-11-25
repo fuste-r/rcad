@@ -198,6 +198,8 @@ class MainWindow(QMainWindow):
         self.view = Viewport()
         self.setCentralWidget(self.view)
         self.view.clicked.connect(self.on_click)
+        self.view.double_clicked.connect(self.on_double_click)
+        self.view.box_selected.connect(self.on_box_select)
         self.view.hovered.connect(self.on_hover)
         self.view.scrolled.connect(self.on_wheel_adjust)
         self.view.extrude_commit.connect(self.on_extrude_commit)
@@ -259,6 +261,7 @@ class MainWindow(QMainWindow):
         self._fillet_mod_prev_kind = None  # its kind before the drag (a pull turns it into a chamfer)
         self._fillet_preview_kind = None  # kind at the last live rebuild
         QShortcut(QKeySequence(Qt.Key_Escape), self, self.cancel)
+        QShortcut(QKeySequence.SelectAll, self, self.select_all)
         self.resize(1300, 800)
         self.set_mode("model")
         self._apply_units()
@@ -401,6 +404,14 @@ class MainWindow(QMainWindow):
         self._region_anchor = None  # world centre of the highlighted region (set in _update_regions)
         self.view.paint_hooks.append(self._place_quick)
         self.tool_bar.active_changed.connect(lambda _active: self._refresh_quick())
+        # a tag at the top of the view naming what is selected
+        self.sel_tag = QLabel(self.view)
+        self.sel_tag.setObjectName("selTag")
+        self.sel_tag.setStyleSheet("#selTag { color: #ffffff; background: rgba(32,34,40,200); "
+                                   "border-radius: 10px; padding: 2px 10px; }")
+        self.sel_tag.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.sel_tag.hide()
+        self.view.paint_hooks.append(self._place_tag)
 
     # ---- units
     @property
@@ -737,6 +748,8 @@ class MainWindow(QMainWindow):
             if self.tool == "select" and self.sketch is not None:
                 self._sketch_press_uv = self.view.sketch_uv(x, y)
                 self._sketch_press_hit = self.view.pick_sketch(x, y)
+                if self._sketch_press_hit is None:
+                    self.view.start_box(x, y)  # a drag from empty space selects what it boxes
             else:
                 self._sketch_press_uv = None
                 self._sketch_press_hit = None
@@ -909,6 +922,7 @@ class MainWindow(QMainWindow):
                 fills.append((f.sketch.region_triangles(self.hover_region[1]), (0.95, 0.9, 0.3, 0.35)))
         self.view.region_fill = fills
         self._refresh_quick()
+        self._refresh_tag()
         self.view.update()
 
     # ---- quick buttons beside the selection
@@ -1591,6 +1605,189 @@ class MainWindow(QMainWindow):
         elif face is not None:
             v.sel_faces.symmetric_difference_update({face})
         self._update_regions()
+
+    # -- selection shortcuts
+    def _clear_model_selection(self):
+        self.view.sel_faces.clear()
+        self.view.sel_edges.clear()
+        for f in self.doc.features:
+            if f.kind == "sketch":
+                f.sketch.selection = []
+
+    def _body_faces(self, body: int) -> set[int]:
+        mesh = self.doc.mesh
+        return {i for i, b in enumerate(mesh.face_body) if b == body}
+
+    def on_double_click(self, x, y, mods):
+        """Double-click: the whole body under the pointer, or in a sketch the connected chain of
+        lines (or the circle). Drawing tools treat it as two clicks. Ctrl adds to the selection."""
+        v, add = self.view, bool(mods & Qt.ControlModifier)
+        if self.mode == "sketch":
+            hit = v.pick_sketch(x, y) if self.tool == "select" else None
+            if hit is None:
+                self.on_click(x, y, Qt.LeftButton, mods)
+                return
+            chain = self._sketch_chain(hit)
+            if not add:
+                v.sketch_sel.clear()
+            v.sketch_sel |= chain
+            self._update_regions()
+            return
+        mesh = self.doc.mesh
+        body = None
+        if mesh is not None:
+            edge = v.pick_edge(x, y)
+            if edge is not None:
+                body = mesh.edge_body[edge]
+                v.sel_edges.discard(edge)  # the first click picked the edge: the body replaces it
+            else:
+                face = v.pick_face(x, y)
+                body = None if face is None else mesh.face_body[face]
+        if body is None:
+            self.on_click(x, y, Qt.LeftButton, mods)
+            return
+        if not add:
+            self._clear_model_selection()
+        v.sel_faces |= self._body_faces(body)
+        self.mark_dirty()
+        self._update_regions()
+
+    def _sketch_chain(self, hit) -> set:
+        """The lines connected (through shared points) to a sketch line or point; a circle alone."""
+        kind, i = hit
+        if kind == "c":
+            return {hit}
+        sk = self.sketch
+        points = {i} if kind == "p" else set(sk.lines[i])
+        lines = set() if kind == "p" else {i}
+        grew = True
+        while grew:
+            grew = False
+            for j, (a, b) in enumerate(sk.lines):
+                if j not in lines and (a in points or b in points):
+                    lines.add(j)
+                    points |= {a, b}
+                    grew = True
+        return {("l", j) for j in lines} if lines else {hit}
+
+    def select_all(self):
+        """Ctrl+A: every body in the model, or everything in the sketch."""
+        self._settle_session()
+        v = self.view
+        if self.mode == "sketch":
+            if self.tool != "select":
+                self.set_tool("select")
+            sk = self.sketch
+            v.sketch_sel = ({("p", i) for i in range(len(sk.points))} | {("l", i) for i in range(len(sk.lines))}
+                            | {("c", i) for i in range(len(sk.circles))})
+        else:
+            self._clear_model_selection()
+            if self.doc.mesh is not None:
+                v.sel_faces |= set(range(len(self.doc.mesh.faces)))
+            self.mark_dirty()
+        self._update_regions()
+
+    def on_box_select(self, x0, y0, x1, y1, mods):
+        """A selection box: everything entirely inside it. In the model that is the visible edges
+        (added to the selection: Ctrl draws the box); in a sketch, points, lines and circles
+        (Ctrl adds, otherwise they replace the selection)."""
+        v = self.view
+        w, h = v.width(), v.height()
+
+        def inside(world) -> bool:
+            q = v.camera.project(np.asarray(world, float).reshape(-1, 3), w, h)
+            return bool(not np.isnan(q).any() and (q[:, 0] >= x0).all() and (q[:, 0] <= x1).all()
+                        and (q[:, 1] >= y0).all() and (q[:, 1] <= y1).all())
+
+        if self.mode == "sketch":
+            sk = self.sketch
+            pl = sk.plane
+            to3 = lambda uv: pl.to3d(*uv)
+            found = {("p", i) for i, p in enumerate(sk.points) if inside([to3(p)])}
+            found |= {("l", i) for i, (a, b) in enumerate(sk.lines) if inside([to3(sk.points[a]), to3(sk.points[b])])}
+            ring = np.linspace(0, 2 * np.pi, 24, endpoint=False)
+            for i, (c, r) in enumerate(sk.circles):
+                u, vv = sk.points[c]
+                if inside([to3((u + r * np.cos(t), vv + r * np.sin(t))) for t in ring]):
+                    found.add(("c", i))
+            if not mods & Qt.ControlModifier:
+                v.sketch_sel.clear()
+            v.sketch_sel |= found
+            self._update_regions()
+            return
+        mesh = self.doc.mesh
+        if mesh is None:
+            return
+        for i, e in enumerate(mesh.edges):
+            if inside(e.polyline) and self._edge_visible(e.mid):
+                v.sel_edges.add(i)
+        self._update_regions()
+
+    def _edge_visible(self, mid) -> bool:
+        """True unless a model face hides this point of an edge from the camera."""
+        v = self.view
+        s = v.camera.project(np.asarray(mid, float).reshape(1, 3), v.width(), v.height())[0]
+        o, d = v.camera.ray(float(s[0]), float(s[1]), v.width(), v.height())
+        t_hit = v.pick_face_hit(float(s[0]), float(s[1]))[1]
+        return t_hit is None or t_hit >= float(np.dot(np.asarray(mid, float) - o, d)) - 1e-3 * v.camera.dist
+
+    def _selection_text(self) -> str:
+        """A short name for what is selected ("Flat face", "3 edges", "Body 2", "2 lines, 1 circle"), or ""."""
+        v = self.view
+
+        def count(n, one, many=None):
+            return f"{n} {one if n == 1 else many or one + 's'}"
+
+        if self.mode == "sketch":
+            kinds = [k for k, _ in v.sketch_sel]
+            names = [("p", "point"), ("l", "line"), ("c", "circle")]
+            if len(kinds) == 1:
+                return dict(names)[kinds[0]].capitalize()
+            return ", ".join(count(kinds.count(k), name) for k, name in names if kinds.count(k))
+        mesh = self.doc.mesh
+        parts = []
+        if v.sel_faces and mesh is not None:
+            faces = {f for f in v.sel_faces if 0 <= f < len(mesh.faces)}
+            bodies = sorted({mesh.face_body[f] for f in faces})
+            if not v.sel_edges and bodies and faces == set().union(*(self._body_faces(b) for b in bodies)):
+                return f"Body {bodies[0] + 1}" if len(bodies) == 1 else f"{len(bodies)} bodies"
+            if len(faces) == 1:
+                parts.append("Flat face" if mesh.faces[next(iter(faces))].normal is not None else "Curved face")
+            else:
+                parts.append(count(len(faces), "face"))
+        if v.sel_edges and mesh is not None:
+            edges = [e for e in v.sel_edges if 0 <= e < len(mesh.edges)]
+            owner = self._edge_owner(edges[0]) if len(edges) == 1 else None
+            if owner is not None:
+                parts.append(f"{self.doc.features[owner].kind.title()} edge")
+            elif len(edges) == 1 and not parts:
+                parts.append("Edge")
+            else:
+                parts.append(count(len(edges), "edge"))
+        if parts:
+            text = ", ".join(parts)
+            return text[0].upper() + text[1:]
+        feats = self.doc.features
+        if 0 <= self.region_sketch < len(feats) and feats[self.region_sketch].kind == "sketch":
+            n = len(feats[self.region_sketch].sketch.selected_regions())
+            if n:
+                return f"{'Region' if n == 1 else f'{n} regions'} of {feats[self.region_sketch].name}"
+        return ""
+
+    def _refresh_tag(self):
+        text = self._selection_text()
+        self.sel_tag.setText(text)
+        self.sel_tag.adjustSize()
+        self._place_tag()
+
+    def _place_tag(self):
+        t = self.sel_tag
+        if not t.text():
+            t.hide()
+            return
+        t.move(max((self.view.width() - t.width()) // 2, 4), 10)
+        t.show()
+        t.raise_()
 
     # -- right-click
     def step_back(self, x, y) -> str:

@@ -42,7 +42,10 @@ On Wayland with NVIDIA, if the OpenGL context fails to create, try `QT_QPA_PLATF
 | Zoom | mouse wheel |
 | Standard view (Top, Bottom, Front, Back, Left, Right) | click a face of the cube in the top-right corner; drag the cube to orbit |
 | Multi-select | Ctrl + click |
-| Cancel / clear selection | Esc |
+| Whole body / whole outline | double-click a face or edge (a sketch line selects every line connected to it); Ctrl adds |
+| Select everything | Ctrl + A (every body, or everything in the sketch) |
+| Box select | in the model Ctrl + drag (adds the visible edges wholly inside); in a sketch drag from empty space (points, lines and circles wholly inside; Ctrl adds) |
+| Cancel / clear selection | Esc (a tag at the top of the view names what is selected) |
 | Step back | right-click (without dragging): cancels an open tool, then drops a half-drawn shape, then leaves the drawing tool, then leaves the sketch. On something (or with something selected) it opens that selection's tools at the pointer instead |
 | Next step for a selection | use the quick buttons beside it: a face offers Sketch and Push/Pull, edges Fillet and Chamfer (and 🗑 for a fillet's edge), a highlighted region Extrude and Revolve, sketch geometry the constraints that fit it; ⋯ holds the rest |
 | Push/pull a face | select it, then drag it |

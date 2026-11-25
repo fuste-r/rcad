@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import numpy as np
 from OpenGL import GL
-from PySide6.QtCore import QRectF, Qt, Signal
+from PySide6.QtCore import QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QPainter
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
-from PySide6.QtWidgets import QLabel
+from PySide6.QtWidgets import QLabel, QRubberBand
 
 from . import viewcube
 from .camera import Camera, FOV_TAN, point_segment_dist, ray_plane, ray_triangles
@@ -20,6 +20,8 @@ DRAG_PX = 4
 
 class Viewport(QOpenGLWidget):
     clicked = Signal(float, float, object, object)  # x, y, Qt.MouseButton, Qt.KeyboardModifier
+    double_clicked = Signal(float, float, object)  # x, y, Qt.KeyboardModifier (left button)
+    box_selected = Signal(float, float, float, float, object)  # x0, y0, x1, y1 (sorted), modifiers
     hovered = Signal(float, float)
     scrolled = Signal(float, float, int, object)  # x, y, angle delta, Qt.KeyboardModifier
     extrude_commit = Signal(float, tuple, tuple)  # distance_mm, center, normal
@@ -54,6 +56,9 @@ class Viewport(QOpenGLWidget):
         self.hover_face: int | None = None
         self.hover_edge: int | None = None
         self.left_orbits = True
+        self._box_origin = None  # screen point a selection box is drawn from, while one may start
+        self._double = False  # the current press is the second press of a double-click
+        self.rubber = QRubberBand(QRubberBand.Rectangle, self)
         self._press = None
         self._dragged = False
         self._last = None
@@ -566,6 +571,12 @@ class Viewport(QOpenGLWidget):
         self._press = (p, e.button(), e.modifiers())
         self._last = p
         self._dragged = False
+        self._box_origin = None
+        # Ctrl+left drag in the model draws a selection box (a sketch starts one on empty space: start_box)
+        if (e.button() == Qt.LeftButton and not self._cube_press and self.sketch is None
+                and e.modifiers() & Qt.ControlModifier):
+            self.start_box(p.x(), p.y())
+            return
         # Drag-to-extrude: left-click on a selected planar face starts the drag
         if (e.button() == Qt.LeftButton and not self._cube_press
                 and not (e.modifiers() & Qt.ShiftModifier) and self.sel_faces and self.mesh):
@@ -603,6 +614,20 @@ class Viewport(QOpenGLWidget):
                 and not (e.modifiers() & (Qt.AltModifier | Qt.ShiftModifier))):
             self.sketch_mouse.emit("press", p.x(), p.y())
 
+    def mouseDoubleClickEvent(self, e):
+        """The second press of a double-click: a press like any other, but its release reports
+        a double-click instead of a click."""
+        self.mousePressEvent(e)
+        self._double = e.button() == Qt.LeftButton and self._press is not None
+
+    def start_box(self, x: float, y: float):
+        """Let the current left drag draw a selection box from (x, y)."""
+        self._box_origin = (float(x), float(y))
+
+    def _box_rect(self, p) -> QRect:
+        x0, y0 = self._box_origin
+        return QRect(int(min(x0, p.x())), int(min(y0, p.y())), int(abs(p.x() - x0)), int(abs(p.y() - y0)))
+
     def mouseMoveEvent(self, e):
         p = e.position()
         if self._press is None:
@@ -622,6 +647,11 @@ class Viewport(QOpenGLWidget):
             self._dragged = True
         self._last = p
         if not self._dragged:
+            return
+        if self._box_origin is not None:
+            r = self._box_rect(p)
+            self.rubber.setGeometry(QRect(r.topLeft(), r.size().expandedTo(QSize(1, 1))))
+            self.rubber.show()
             return
         # Sketch drag: report a plain left drag in sketch mode to the app.
         # Takes priority over orbit/pan so a left drag moves geometry, not the camera.
@@ -869,12 +899,26 @@ class Viewport(QOpenGLWidget):
         self.fillet_commit.emit(r, st["mids"], st["kind"])  # 0 rolls back a live preview
 
     def mouseReleaseEvent(self, e):
+        double, self._double = self._double, False
+        if self._box_origin is not None and self._press is not None and self._dragged:
+            p, (x0, y0) = e.position(), self._box_origin
+            self._box_origin = None
+            self.rubber.hide()
+            mods = self._press[2]
+            self._press = None
+            self.box_selected.emit(min(x0, p.x()), min(y0, p.y()), max(x0, p.x()), max(y0, p.y()), mods)
+            self.update()
+            return
+        self._box_origin = None
+        self.rubber.hide()
         if self._press is not None and not self._dragged:
             p = e.position()
             if self._cube_press:
                 face = viewcube.pick(viewcube.rotation(self.camera), p.x(), p.y(), self._cube_rect())
                 if face:
                     self._snap_view(face)
+            elif double:
+                self.double_clicked.emit(p.x(), p.y(), self._press[2])
             else:
                 self.clicked.emit(p.x(), p.y(), self._press[1], self._press[2])
         # Commit drag-to-extrude / drag-to-fillet, unless a typed value awaits Enter

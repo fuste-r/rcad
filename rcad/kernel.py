@@ -109,6 +109,8 @@ class MeshData:
     faces: list[FaceInfo]
     edges: list[EdgeInfo]
     shape: Shape | None = field(default=None, repr=False)  # the shape meshed, for on-demand queries
+    face_body: list = field(default_factory=list)  # body (solid) index of each face
+    edge_body: list = field(default_factory=list)  # body (solid) index of each edge
     _edge_shapes: list = field(default_factory=list, repr=False)  # build123d edge for each EdgeInfo
     _away: dict = field(default_factory=dict, repr=False)
 
@@ -156,9 +158,22 @@ def _edge_out(edge, mid, candidates) -> np.ndarray | None:
     return out / length if length > 1e-9 else None
 
 
+def _body_index(shape: Shape, kind: str):
+    """A function giving the solid index (0 if unknown) of a face or edge of `shape`."""
+    found = {}
+    for k, solid in enumerate(shape.solids()):
+        for sub in getattr(solid, kind)():
+            found.setdefault(hash(sub), []).append((sub, k))
+
+    def body(sub) -> int:
+        return next((k for other, k in found.get(hash(sub), []) if other.wrapped.IsSame(sub.wrapped)), 0)
+    return body
+
+
 def build_mesh(shape: Shape, tol: float = 0.05) -> MeshData:
-    verts, tris, owner, faces = [], [], [], []
+    verts, tris, owner, faces, face_body = [], [], [], [], []
     base = 0
+    face_of = _body_index(shape, "faces")
     for face in shape.faces():
         v, t = face.tessellate(tol)
         if not t:
@@ -169,14 +184,18 @@ def build_mesh(shape: Shape, tol: float = 0.05) -> MeshData:
         base += len(v)
         planar = face.geom_type == GeomType.PLANE
         faces.append(FaceInfo(_vec(face.center()), _vec(face.normal_at()) if planar else None))
-    edges, edge_shapes = [], []
+        face_body.append(face_of(face))
+    edges, edge_shapes, edge_body = [], [], []
+    edge_of = _body_index(shape, "edges")
     for e in shape.edges():
         n = 2 if e.geom_type == GeomType.LINE else 32
         pts = np.array([_vec(e @ (i / (n - 1))) for i in range(n)])
         edges.append(EdgeInfo(_vec(e @ 0.5), pts))
         edge_shapes.append(e)
+        edge_body.append(edge_of(e))
     return MeshData(np.array(verts, np.float32).reshape(-1, 3), np.array(tris, np.uint32).reshape(-1, 3),
-                    np.array(owner, np.int32), faces, edges, shape, edge_shapes)
+                    np.array(owner, np.int32), faces, edges, shape, face_body=face_body, edge_body=edge_body,
+                    _edge_shapes=edge_shapes)
 
 
 def _mostly_inside(part: Shape, solid: Shape) -> bool:

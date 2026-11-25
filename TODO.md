@@ -30,7 +30,7 @@ Interaction ideas taken from superGeometry.app's README (Nov 2026). Several of t
 - [ ] Sketch regions: overlapping closed shapes split into separately selectable regions. Clicking a region shows the extrude arrow right away, the region itself can be dragged, more regions can be added while the distance is still 0, and construction geometry never makes regions.
 - [ ] Auto extrude operation: decide new body, add, or cut from the drag direction (on a plane, up is a new body and down is a cut; on a face, out adds and in cuts), with an explicit override. Start at the last-used distance.
 - [x] Right-click steps back: first a half-finished entity or pick, then the active tool, then out of the sketch. With something selected, right-click opens its tools at the pointer.
-- [ ] Selection shortcuts: double-click selects the whole body, Ctrl+A selects everything, drag a box on empty space to select several, and a tag names what is picked.
+- [x] Selection shortcuts: double-click selects the whole body, Ctrl+A selects everything, drag a box on empty space to select several, and a tag names what is picked.
 - [ ] Navigation: mouse presets matching other CAD programs (Onshape, Fusion, SolidWorks, Blender, FreeCAD, and others), a settable orbit centre, 90° turn buttons on the view cube, double-click the cube to fit, and saved views.
 - [ ] Smooth onboarding: a new project opens in a sketch on XY looking down with Line active, and leaving a sketch swings to a three-quarter view.
 - [ ] Strict constraints: refuse a constraint or typed value that contradicts the existing ones, with a message, instead of distorting the sketch. Draw constraint marks small, faint, and colour-coded by kind, and keep them from catching clicks meant for geometry.
