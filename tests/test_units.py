@@ -80,10 +80,11 @@ def test_ui_inches(qapp, monkeypatch, tmp_path):
     type_number(monkeypatch, None)
     assert w.ask_length("t", "l", 10.0)[0] == 10.0
 
-    d = appmod.ExtrudeDialog(w, 10.0, unit=INCH)
-    assert d.distance_mm == 10.0
-    d.dist.setText("1")
-    assert d.distance_mm == pytest.approx(25.4)
+    from rcad.tool_bar import ScrubField
+    d = ScrubField(10.0, "length", INCH)
+    assert d.value() == 10.0
+    d.setText("1")
+    assert d.value() == pytest.approx(25.4)
 
     # dimension a sketch line in inches
     w.plane_combo.setCurrentText("XY")

@@ -84,7 +84,6 @@ def test_full_workflow(qapp, monkeypatch, tmp_path):
     assert w.mode == "model"
 
     # extrude
-    monkeypatch.setattr(appmod.ExtrudeDialog, "exec", lambda self: True)
     w.extrude()
     assert not w.doc.errors
     vol = 50 * 30 * 10 - np.pi * 16 * 10
@@ -254,20 +253,13 @@ def test_revolve_workflow_and_edit(qapp, monkeypatch):
     w.sketch.add_rect(10, 0, 20, 30)
     w.sketch.solve()
     w.finish_sketch()
-    class AcceptedRevolveDialog:
-        angle_value = 360.0
-
-        def __init__(self, *args, **kwargs):
-            self.angle = type("Angle", (), {"value": lambda _: self.angle_value})()
-            self.axis_name = "u"
-            self.cut = False
-
-        def exec(self):
-            return True
-
-    monkeypatch.setattr(appmod, "RevolveDialog", AcceptedRevolveDialog)
-
     w.revolve()
+    bar = w.tool_bar
+    assert bar.active and bar.values() == {"angle": 360.0, "axis": "v", "mode": "add"}
+    bar.choices["axis"][0].click()  # V -> U axis
+    assert bar.values()["axis"] == "u"
+    bar.finish()
+    assert not bar.active
     feature = w.doc.features[-1]
     expected = np.pi * (20**2 - 10**2) * 30
     assert feature.kind == "revolve"
@@ -276,9 +268,10 @@ def test_revolve_workflow_and_edit(qapp, monkeypatch):
     assert w.doc.part.volume == pytest.approx(expected, rel=1e-6)
 
     feature_item = w.features.item(w.features.count() - 1)
-    AcceptedRevolveDialog.angle_value = 180.0
     w.edit_feature(feature_item)
-    assert feature.value == pytest.approx(180.0)
+    bar.fields["angle"].setText("180")
+    assert feature.value == pytest.approx(180.0)  # previews live
+    bar.finish()
     assert w.doc.part.volume == pytest.approx(expected / 2, rel=1e-6)
 
 
@@ -345,7 +338,6 @@ def test_drag_fillet_preview_commit(qapp, monkeypatch):
     click(w, (0, 0, 0))
     click(w, (40, 30, 0))
     w.finish_sketch()
-    monkeypatch.setattr(appmod.ExtrudeDialog, "exec", lambda self: True)
     w.extrude()
     assert not w.doc.errors
     vol0 = w.doc.part.volume
@@ -402,7 +394,6 @@ def test_drag_fillet_edit_existing(qapp, monkeypatch):
     click(w, (0, 0, 0))
     click(w, (40, 30, 0))
     w.finish_sketch()
-    monkeypatch.setattr(appmod.ExtrudeDialog, "exec", lambda self: True)
     monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
     w.extrude()
     assert not w.doc.errors
@@ -465,7 +456,6 @@ def test_fillet_result_edges_stay_current_across_fillets(qapp, monkeypatch, tmp_
     click(w, (0, 0, 0))
     click(w, (40, 30, 0))
     w.finish_sketch()
-    monkeypatch.setattr(appmod.ExtrudeDialog, "exec", lambda self: True)
     w.extrude()
     assert not w.doc.errors
 
@@ -577,7 +567,6 @@ def test_layer_checkbox_toggles(qapp, monkeypatch):
     click(w, (0, 0, 0))
     click(w, (20, 10, 0))
     w.finish_sketch()
-    monkeypatch.setattr(appmod.ExtrudeDialog, "exec", lambda self: True)
     w.extrude()
     vol = w.doc.part.volume
     assert w.view.overlay_sketches == [w.doc.features[0].sketch]

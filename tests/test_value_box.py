@@ -65,7 +65,6 @@ def _box_model(monkeypatch):
         x, y = w.view.camera.project(np.array([p], float), 1000, 700)[0][:2]
         w.on_click(x, y, Qt.LeftButton, Qt.NoModifier)
     w.finish_sketch()
-    monkeypatch.setattr(appmod.ExtrudeDialog, "exec", lambda self: True)
     w.extrude()
     assert not w.doc.errors
     return w
@@ -507,20 +506,6 @@ def test_ask_length_accepts_expressions(qapp, monkeypatch):
     assert w.ask_length("t", "l", 5.0) == (pytest.approx(16.0), True)
     monkeypatch.setattr(appmod.NumberDialog, "exec", lambda self: False)
     assert w.ask_length("t", "l", 5.0) == (5.0, False)
-
-
-def test_extrude_and_revolve_dialogs_take_expressions(qapp):
-    w = MainWindow()
-    d = appmod.ExtrudeDialog(w, 10.0, variables={"h": 4.0})
-    d.dist.setText("h * 2.5")
-    assert d.distance_mm == pytest.approx(10.0)
-    d.dist.setText("-1in")
-    assert d.distance_mm == pytest.approx(-25.4)
-    r = appmod.RevolveDialog(w, variables={"a": 45.0})
-    r.angle.setText("a * 2")
-    assert r.angle.value() == pytest.approx(90.0)
-    r.angle.setText("0")
-    assert r.angle.value() is None  # below the 1° minimum
 
 
 def test_variables_dialog_values_take_expressions(qapp):

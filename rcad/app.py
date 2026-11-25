@@ -26,74 +26,11 @@ from .sketch import (
 )
 from .units import MM, UNITS
 from .theme import CHOICES, apply_choice
+from .tool_bar import Choice, Number, ToolSettingsBar
 from .value_box import FieldSet, NumberField, bind_ok
 from .viewport import Viewport
 
 FILE_FILTER = "rCad project (*.rcad)"
-
-
-class ExtrudeDialog(QDialog):
-    def __init__(self, parent, distance=10.0, auto=True, cut=False, show_mode=True, unit=MM, variables=None):
-        super().__init__(parent)
-        self.unit = unit
-        self.setWindowTitle("⇈")
-        self.dist = NumberField(distance, "length", unit, variables, lo=-1e5, hi=1e5)
-        self.mode = QComboBox()
-        self.mode.addItems(["Auto (into the body = cut, away = add)", "Add (join)", "Cut (subtract)"])
-        self.mode.setCurrentIndex(0 if auto else 2 if cut else 1)
-        form = QFormLayout(self)
-        form.addRow("Distance (negative = opposite side)", self.dist)
-        if show_mode:
-            form.addRow("Operation", self.mode)
-        box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        box.accepted.connect(self.accept)
-        box.rejected.connect(self.reject)
-        bind_ok(box, [self.dist])
-        form.addRow(box)
-
-    @property
-    def distance_mm(self) -> float:
-        v = self.dist.value()  # untouched text gives the exact starting distance
-        return v if v is not None else self.dist.last_valid
-
-    @property
-    def auto(self) -> bool:
-        return self.mode.currentIndex() == 0
-
-    @property
-    def cut(self) -> bool:
-        return self.mode.currentIndex() == 2
-
-
-class RevolveDialog(QDialog):
-    def __init__(self, parent, angle=360.0, axis="v", cut=False, variables=None):
-        super().__init__(parent)
-        self.setWindowTitle("Revolve")
-        self.angle = NumberField(angle, "angle", variables=variables, lo=1.0, hi=360.0)
-        self.axis = QComboBox()
-        self.axis.addItem("Sketch U axis", "u")
-        self.axis.addItem("Sketch V axis", "v")
-        self.axis.setCurrentIndex(0 if axis == "u" else 1)
-        self.mode = QComboBox()
-        self.mode.addItems(["Add (join)", "Cut (subtract)"])
-        self.mode.setCurrentIndex(1 if cut else 0)
-        form = QFormLayout(self)
-        form.addRow("Angle", self.angle)
-        form.addRow("Axis", self.axis)
-        form.addRow("Operation", self.mode)
-        box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        box.accepted.connect(self.accept)
-        box.rejected.connect(self.reject)
-        bind_ok(box, [self.angle])
-        form.addRow(box)
-
-    @property
-    def axis_name(self) -> str:
-        return self.axis.currentData()
-
-    @property
-    def cut(self) -> bool:
-        return self.mode.currentIndex() == 1
 
 
 class SweepDialog(QDialog):
@@ -296,6 +233,10 @@ class MainWindow(QMainWindow):
         self.fields.cancelled.connect(self.cancel)
         self._draw_mouse = None  # (snapped point index, (u, v), x, y) of the last drawing hover
         self._drawn = None  # shape just drawn whose size boxes stay on it (see _show_drawn)
+        # Settings bar for the active feature tool; the feature previews live while it is open
+        self.tool_bar = ToolSettingsBar(self.view, lambda: self.unit, lambda: self.doc.variables)
+        self._session = None  # {"feature", "new", "snapshot", "apply", "done"} while the bar edits a feature
+        self._last_extrude = 10.0  # extrude starts at the last distance used
         self._last_segment = None  # (start, end) points of the last line drawn in the current chain
         self.view.sketch_mouse.connect(self.on_sketch_mouse)
 
@@ -521,6 +462,7 @@ class MainWindow(QMainWindow):
 
     # ---- state / refresh
     def set_mode(self, mode):
+        self._settle_session()
         self.fields.stop()
         self.mode = mode
         sketching = mode == "sketch"
@@ -581,6 +523,7 @@ class MainWindow(QMainWindow):
     def _push_undo(self):
         if self._restoring:
             return
+        self._settle_session()  # another change: keep (or drop, if failing) the open tool's feature
         self._undo.append(self.doc.to_dict())
         self._redo.clear()
 
@@ -634,6 +577,7 @@ class MainWindow(QMainWindow):
         self._sketch_redo.clear()
 
     def undo(self):
+        self._settle_session()
         if self.mode == "sketch" and self.undo_sketch():
             return
         if not self._undo:
@@ -653,6 +597,7 @@ class MainWindow(QMainWindow):
         self._restoring = False
 
     def redo(self):
+        self._settle_session()
         if self.mode == "sketch" and self.redo_sketch():
             return
         if not self._redo:
@@ -744,6 +689,9 @@ class MainWindow(QMainWindow):
         self._update_regions()
 
     def cancel(self):
+        if self._session is not None:  # Esc: the open tool is cancelled and the feature put back
+            self._cancel_session()
+            return
         if self.mode == "sketch" and self.pending is None and self.tool != "select":
             self.set_tool("select")  # Esc with nothing in progress leaves the drawing tool
             return
@@ -1613,12 +1561,106 @@ class MainWindow(QMainWindow):
             return
         chosen = sorted(sk.selected_regions())
         profiles = [list(next(p for p in sk.selection if sk.region_at(*p) == r)) for r in chosen] or None
-        dlg = ExtrudeDialog(self, show_mode=self.doc.part is not None, unit=self.unit,
-                            variables=self.doc.variables)
-        dlg.setWindowTitle(f"Extrude {len(profiles)} highlighted region(s)" if profiles else "Extrude all regions")
-        if dlg.exec():
-            self.commit(Feature("extrude", sketch_ref=i, value=dlg.distance_mm, cut=dlg.cut, auto=dlg.auto,
-                                profiles=profiles))
+        title = f"Extrude {len(profiles)} region(s)" if profiles else "Extrude"
+        show_mode = self.doc.part is not None
+        self._extrude_session(Feature("extrude", sketch_ref=i, value=self._last_extrude, auto=True,
+                                      profiles=profiles), title, new=True, show_mode=show_mode)
+
+    # ---- tool settings bar sessions
+    EXTRUDE_MODES = [("auto", "Auto"), ("add", "Add"), ("cut", "Cut")]
+    REVOLVE_AXES = [("u", "Sketch U axis"), ("v", "Sketch V axis")]
+    ADD_CUT = [("add", "Add"), ("cut", "Cut")]
+
+    def _extrude_session(self, f: Feature, title: str, new: bool, show_mode: bool = True):
+        items = [Number("distance", "Distance", f.value, lo=-1e5, hi=1e5)]
+        if show_mode:
+            items.append(Choice("mode", "Operation", self.EXTRUDE_MODES,
+                                "auto" if f.auto else "cut" if f.cut else "add"))
+
+        def apply(f, v):
+            f.value = v["distance"]
+            mode = v.get("mode", "auto")
+            f.auto, f.cut = mode == "auto", mode == "cut"
+
+        def done(f):
+            self._last_extrude = f.value
+
+        self._begin_session(title, items, f, new, apply, done)
+
+    def _revolve_session(self, f: Feature, title: str, new: bool):
+        items = [Number("angle", "Angle", f.value, "angle", lo=1.0, hi=360.0),
+                 Choice("axis", "Axis", self.REVOLVE_AXES, f.axis),
+                 Choice("mode", "Operation", self.ADD_CUT, "cut" if f.cut else "add")]
+
+        def apply(f, v):
+            f.value, f.axis, f.cut = v["angle"], v["axis"], v["mode"] == "cut"
+
+        self._begin_session(title, items, f, new, apply)
+
+    def _begin_session(self, title, items, f: Feature, new: bool, apply, done=None):
+        """Open the settings bar on a feature: new ones are added to the history right away and
+        every change rebuilds the model; ✓ keeps it, ✕ puts the history back. One undo step."""
+        self._settle_session()
+        self._push_undo()
+        snapshot = {k: getattr(f, k) for k in ("value", "cut", "auto", "axis")}
+        if new:
+            self.doc.features.append(f)
+        self._session = {"feature": f, "new": new, "snapshot": snapshot, "apply": apply, "done": done}
+        self.tool_bar.begin(title, items, self._session_changed, self._finish_session, self._cancel_session)
+        self._session_changed(self.tool_bar.values())
+
+    def _session_index(self) -> int | None:
+        f = self._session["feature"]
+        return next((i for i, x in enumerate(self.doc.features) if x is f), None)
+
+    def _session_changed(self, values: dict | None):
+        s = self._session
+        if s is None or values is None:
+            return
+        f = s["feature"]
+        s["apply"](f, values)
+        f.version += 1
+        self.rebuild()
+        self.tool_bar.set_error(self.doc.errors.get(self._session_index()))
+
+    def _finish_session(self) -> bool:
+        """✓ / Enter: keep the feature as previewed. Returns False (bar stays open) if it fails."""
+        s = self._session
+        if s is None:
+            return True
+        i = self._session_index()
+        if i is None or i in self.doc.errors:
+            self.tool_bar.set_error(self.doc.errors.get(i, "The feature is gone"))
+            return False
+        self._session = None
+        self.tool_bar.end()
+        if s["done"]:
+            s["done"](s["feature"])
+        self.view.setFocus()
+        return True
+
+    def _cancel_session(self):
+        """✕ / Esc: put the history back as it was before the tool opened."""
+        s, self._session = self._session, None
+        self.tool_bar.end()
+        if s is None:
+            return
+        f = s["feature"]
+        if s["new"]:
+            self.doc.features[:] = [x for x in self.doc.features if x is not f]
+        else:
+            for k, v in s["snapshot"].items():
+                setattr(f, k, v)
+            f.version += 1
+        if self._undo:
+            self._undo.pop()  # the snapshot taken when the tool opened
+        self.rebuild()
+        self.view.setFocus()
+
+    def _settle_session(self):
+        """Something else is starting: keep the open tool's feature, or drop it if it fails."""
+        if self._session is not None and not self._finish_session():
+            self._cancel_session()
 
     def revolve(self):
         i = self._sketch_for_extrude()
@@ -1633,10 +1675,8 @@ class MainWindow(QMainWindow):
             return
         chosen = sorted(sketch.selected_regions())
         profiles = [list(next(p for p in sketch.selection if sketch.region_at(*p) == r)) for r in chosen] or None
-        dialog = RevolveDialog(self, variables=self.doc.variables)
-        if dialog.exec():
-            self.commit(Feature("revolve", sketch_ref=i, value=dialog.angle.value(), cut=dialog.cut,
-                                profiles=profiles, axis=dialog.axis_name))
+        self._revolve_session(Feature("revolve", sketch_ref=i, value=360.0, axis="v", profiles=profiles),
+                              "Revolve", new=True)
 
     def sweep(self):
         profile_ref = self._sketch_for_extrude()
@@ -2026,27 +2066,14 @@ class MainWindow(QMainWindow):
         if f.kind == "sketch":
             self.enter_sketch(i)
             return
-        self._push_undo()
         if f.kind == "extrude":
-            dlg = ExtrudeDialog(self, f.value, f.auto, f.cut, unit=self.unit, variables=self.doc.variables)
-            if not dlg.exec():
-                return
-            new = (dlg.distance_mm, dlg.cut, dlg.auto)
-        elif f.kind == "revolve":
-            dlg = RevolveDialog(self, f.value, f.axis, f.cut, variables=self.doc.variables)
-            if not dlg.exec():
-                return
-            old = (f.value, f.axis, f.cut)
-            f.value, f.axis, f.cut = dlg.angle.value(), dlg.axis_name, dlg.cut
-            f.version += 1
-            self.rebuild()
-            if i in self.doc.errors:
-                QMessageBox.warning(self, "Operation failed", self.doc.errors[i])
-                f.value, f.axis, f.cut = old
-                f.version += 1
-                self.rebuild()
+            self._extrude_session(f, "Edit extrude", new=False)
             return
-        elif f.kind == "sweep":
+        if f.kind == "revolve":
+            self._revolve_session(f, "Edit revolve", new=False)
+            return
+        self._push_undo()
+        if f.kind == "sweep":
             paths = [(j, f"{j}: {g.name}") for j, g in enumerate(self.doc.features)
                      if g.kind == "sketch" and j != f.sketch_ref and g.sketch.lines]
             dlg = SweepDialog(self, paths, f.path_ref, f.cut)
@@ -2127,6 +2154,7 @@ class MainWindow(QMainWindow):
         return r == QMessageBox.Yes
 
     def _load(self, doc, path):
+        self._cancel_session()
         self.doc, self.path = doc, path
         self.sketch_index = -1
         self._undo.clear()

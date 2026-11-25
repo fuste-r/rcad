@@ -81,7 +81,6 @@ def _click(w, p, mods=Qt.NoModifier):
 
 def test_ui_highlight_and_extrude_selected(qapp, monkeypatch):
     monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
-    monkeypatch.setattr(appmod.ExtrudeDialog, "exec", lambda self: True)
     w = appmod.MainWindow()
     w.view.resize(1000, 700)
     w.plane_combo.setCurrentText("XY")
@@ -125,7 +124,6 @@ def test_model_extrude_asks_for_region_when_ambiguous(qapp, monkeypatch):
 
 def test_select_regions_in_model_mode(qapp, monkeypatch):
     monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
-    monkeypatch.setattr(appmod.ExtrudeDialog, "exec", lambda self: True)
     w = appmod.MainWindow()
     w.view.resize(1000, 700)
     w.doc.features.append(Feature("sketch", "S", sketch=two_rects()))
@@ -141,6 +139,7 @@ def test_select_regions_in_model_mode(qapp, monkeypatch):
     _click(w, (40, 5, 0), Qt.ControlModifier)
     assert len(w.doc.features[0].sketch.selected_regions()) == 1
     w.extrude()  # selection made outside sketch mode drives the extrude
+    w.tool_bar.finish()
     assert w.mode == "model" and not w.doc.errors
     assert w.doc.features[1].profiles is not None and len(w.doc.features[1].profiles) == 1
     assert w.doc.part.volume == pytest.approx(20 * 10 * 10)
