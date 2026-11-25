@@ -75,7 +75,7 @@ class ValueBox(QLineEdit):
     scrub_finished = Signal(float)  # mouse released after a scrub
     focused = Signal()
 
-    COLORS = {"extrude": "0,128,0", "fillet": "128,0,128", "sketch": "30,90,200"}
+    COLORS = {"extrude": "0,128,0", "fillet": "128,0,128", "chamfer": "190,95,0", "sketch": "30,90,200"}
 
     def __init__(self, parent, unit_fn: Callable[[], Unit], variables_fn: Callable[[], dict],
                  quantity: str = "length"):

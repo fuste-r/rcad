@@ -104,6 +104,21 @@ class MeshData:
     tri_face: np.ndarray  # (M,) index into faces per triangle
     faces: list[FaceInfo]
     edges: list[EdgeInfo]
+    shape: Shape | None = field(default=None, repr=False)  # the shape meshed, for on-demand queries
+    _edge_shapes: list = field(default_factory=list, repr=False)  # build123d edge for each EdgeInfo
+    _away: dict = field(default_factory=dict, repr=False)
+
+    def edge_away(self, i: int) -> np.ndarray | None:
+        """Unit vector at edge i's middle pointing away from the material: the sum of the
+        outward normals of the faces that meet there (convex corner: diagonally out of the
+        body; concave: into the empty space). None if it can't be worked out. Cached."""
+        if i not in self._away:
+            self._away[i] = None
+            if self.shape is not None and 0 <= i < len(self._edge_shapes):
+                e = self._edge_shapes[i]
+                faces = [f for f in self.shape.faces() if any(fe.wrapped.IsSame(e.wrapped) for fe in f.edges())]
+                self._away[i] = _edge_out(e, e @ 0.5, [(e, f) for f in faces])
+        return self._away[i]
 
 
 def _vec(v) -> np.ndarray:
@@ -115,6 +130,26 @@ def _main_solid(shape: Shape) -> Solid:
     if not solids:
         raise ValueError("model has no solid")
     return max(solids, key=lambda s: s.volume)
+
+
+def _edge_out(edge, mid, candidates) -> np.ndarray | None:
+    """Direction away from the material at an edge: the sum of the outward normals of the faces
+    that meet there (for a convex corner, the diagonal out of the body; for a concave one, into
+    the empty space). None if it can't be worked out."""
+    normals, seen = [], []
+    for fe, face in candidates:
+        if not fe.wrapped.IsSame(edge.wrapped) or any(face.wrapped.IsSame(f.wrapped) for f in seen):
+            continue
+        seen.append(face)
+        try:
+            normals.append(_vec(face.normal_at(mid)))
+        except Exception:
+            continue
+    if not normals:
+        return None
+    out = np.sum(normals, axis=0)
+    length = float(np.linalg.norm(out))
+    return out / length if length > 1e-9 else None
 
 
 def build_mesh(shape: Shape, tol: float = 0.05) -> MeshData:
@@ -130,13 +165,14 @@ def build_mesh(shape: Shape, tol: float = 0.05) -> MeshData:
         base += len(v)
         planar = face.geom_type == GeomType.PLANE
         faces.append(FaceInfo(_vec(face.center()), _vec(face.normal_at()) if planar else None))
-    edges = []
+    edges, edge_shapes = [], []
     for e in shape.edges():
         n = 2 if e.geom_type == GeomType.LINE else 32
         pts = np.array([_vec(e @ (i / (n - 1))) for i in range(n)])
         edges.append(EdgeInfo(_vec(e @ 0.5), pts))
+        edge_shapes.append(e)
     return MeshData(np.array(verts, np.float32).reshape(-1, 3), np.array(tris, np.uint32).reshape(-1, 3),
-                    np.array(owner, np.int32), faces, edges)
+                    np.array(owner, np.int32), faces, edges, shape, edge_shapes)
 
 
 def _find_planar_face(part: Shape, center, normal):

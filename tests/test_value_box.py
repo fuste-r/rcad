@@ -174,9 +174,9 @@ def test_fillet_typed_and_cancelled(qapp, monkeypatch):
     n = len(w.doc.features)
     undo_depth = len(w._undo)
     mids = [tuple(map(float, w.doc.mesh.edges[0].mid))]
-    v._fillet_state = {"mids": mids, "outward": None, "start_screen": (0, 0), "radius": 1.0}
+    v._fillet_state = {"mids": mids, "away": None, "start_screen": (0, 0), "radius": 1.0, "kind": "fillet", "dir": None}
     v._dragged = True
-    v.fillet_preview.emit(1.0, mids)  # what the drag would have emitted
+    v.fillet_preview.emit(1.0, mids, "fillet")  # what the drag would have emitted
     assert w.doc.features[-1].kind == "fillet"
     _key(v, "2")
     assert w.doc.features[-1].value == pytest.approx(2.0)  # typed value previews live
@@ -189,9 +189,9 @@ def test_fillet_typed_then_enter_commits(qapp, monkeypatch):
     w = _box_model(monkeypatch)
     v = w.view
     mids = [tuple(map(float, w.doc.mesh.edges[0].mid))]
-    v._fillet_state = {"mids": mids, "outward": None, "start_screen": (0, 0), "radius": 1.0}
+    v._fillet_state = {"mids": mids, "away": None, "start_screen": (0, 0), "radius": 1.0, "kind": "fillet", "dir": None}
     v._dragged = True
-    v.fillet_preview.emit(1.0, mids)
+    v.fillet_preview.emit(1.0, mids, "fillet")
     _key(v, "2")
     v.value_box.setText("2.5")
     v.value_box._on_text("2.5")
@@ -263,9 +263,9 @@ def test_scrub_to_failing_fillet_reverts(qapp, monkeypatch):
     w = _box_model(monkeypatch)
     v = w.view
     mids = [tuple(map(float, w.doc.mesh.edges[0].mid))]
-    v._fillet_state = {"mids": mids, "outward": None, "start_screen": (0, 0), "radius": 2.0}
+    v._fillet_state = {"mids": mids, "away": None, "start_screen": (0, 0), "radius": 2.0, "kind": "fillet", "dir": None}
     v._dragged = True
-    v.fillet_preview.emit(2.0, mids)
+    v.fillet_preview.emit(2.0, mids, "fillet")
     v._finish_fillet()
     f = w.doc.features[-1]
     assert f.kind == "fillet" and w._value_feature is f

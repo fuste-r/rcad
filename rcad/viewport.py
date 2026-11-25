@@ -24,10 +24,10 @@ class Viewport(QOpenGLWidget):
     scrolled = Signal(float, float, int, object)  # x, y, angle delta, Qt.KeyboardModifier
     extrude_commit = Signal(float, tuple, tuple)  # distance_mm, center, normal
     sketch_mouse = Signal(str, float, float)  # phase ("press"|"move"|"release"), x, y
-    fillet_commit = Signal(float, list)  # radius_mm, [edge midpoints]
-    fillet_preview = Signal(float, list)  # live radius_mm, [edge midpoints]
+    fillet_commit = Signal(float, list, str)  # size_mm, [edge midpoints], "fillet" (push) | "chamfer" (pull)
+    fillet_preview = Signal(float, list, str)  # live size_mm, [edge midpoints], kind
     fillet_cancel = Signal()  # Esc during a drag: undo the live fillet
-    value_edit = Signal(str, float)  # kind ("extrude"|"fillet"), new mm typed after the drag
+    value_edit = Signal(str, float)  # kind ("extrude"|"fillet"|"chamfer"), new mm typed after the drag
     value_scrub = Signal(str, float)  # kind, live mm while the box left after a drag is scrubbed
 
     def __init__(self):
@@ -64,7 +64,7 @@ class Viewport(QOpenGLWidget):
         self._seg_edge = np.zeros(0, int)
         self._extrude_state = None  # {"face", "center", "normal", "start_screen", "outline"}
         self._extrude_dist = 0.0
-        self._fillet_state = None  # {"mids", "outward", "start_screen", "radius"}
+        self._fillet_state = None  # {"mids", "away", "start_screen", "radius", "kind", "dir"}
         # Value box: shows the dragged size; typing a number sets it. After the drag
         # it stays on the model (``_value_post``) so the new feature's size can be retyped.
         self.variables_source = dict  # callable returning the document's variables (mm)
@@ -110,29 +110,25 @@ class Viewport(QOpenGLWidget):
             self.camera.dist = max(float(np.linalg.norm(hi - lo)) * 1.8, 20.0)
         self.update()
 
-    def _fillet_outward(self, edge_idx: int):
-        """World unit vector the fillet grows along (perpendicular to the edge, in its face).
-        Returns None if the edge's face can't be resolved."""
+    def _edge_tangent(self, edge_idx: int):
+        """World unit direction of an edge at its middle, or None."""
         m = self.mesh
-        if m is None or not len(m.edges) or not (0 <= edge_idx < len(m.edges)):
+        if m is None or not (0 <= edge_idx < len(m.edges)):
             return None
-        pts = m.edges[edge_idx].polyline
+        pts = np.asarray(m.edges[edge_idx].polyline, float)
         if len(pts) < 2:
             return None
-        d = (pts[-1] - pts[0]).astype(float)
-        d = d / max(float(np.linalg.norm(d)), 1e-12)
-        mid = np.asarray(m.edges[edge_idx].mid, float)
-        w, h = self.width(), self.height()
-        s = self.camera.project(mid.reshape(1, 3), w, h)[0]
-        face = self.pick_face(float(s[0]), float(s[1]))
-        if face is None or m.faces[face].normal is None:
+        k = len(pts) // 2
+        d = pts[min(k + 1, len(pts) - 1)] - pts[max(k - 1, 0)] if len(pts) > 2 else pts[-1] - pts[0]
+        n = float(np.linalg.norm(d))
+        return d / n if n > 1e-12 else None
+
+    def _edge_away(self, edge_idx: int):
+        """World unit vector pointing away from the material at an edge, or None."""
+        m = self.mesh
+        if m is None or not (0 <= edge_idx < len(m.edges)):
             return None
-        n = np.asarray(m.faces[face].normal, float)
-        out = np.cross(d, n)
-        if float(np.linalg.norm(out)) < 1e-9:
-            out = np.cross(n, d)
-        out = out / max(float(np.linalg.norm(out)), 1e-12)
-        return out
+        return m.edge_away(edge_idx)
 
     # -- picking
     def pick_face(self, x, y) -> int | None:
@@ -593,9 +589,12 @@ class Viewport(QOpenGLWidget):
                 mids = [tuple(map(float, self.mesh.edges[i].mid)) for i in sel]
                 self._fillet_state = {
                     "mids": mids,
-                    "outward": self._fillet_outward(sel[0]),
+                    "away": self._edge_away(sel[0]),
+                    "tangent": self._edge_tangent(sel[0]),
                     "start_screen": (p.x(), p.y()),
                     "radius": 0.0,
+                    "kind": "fillet",
+                    "dir": None,  # world direction the value box sits along (follows the drag)
                 }
         # Sketch drag: report a plain left press in sketch mode to the app
         if (e.button() == Qt.LeftButton and not self._cube_press
@@ -653,36 +652,51 @@ class Viewport(QOpenGLWidget):
                 px_per_world = self.height() / (2.0 * depth * FOV_TAN)
                 self._extrude_dist = d_px / px_per_world
         elif self._fillet_state is not None:
-            # Screen-space drag: project cursor movement onto the edge's outward
-            # (perpendicular, in-face) screen projection; abs() so either side
-            # of the edge grows the radius. Convert px to world mm at the edge depth.
+            # Drag across the edge on screen: toward the body rounds it (fillet), away from
+            # the body bevels it (chamfer). Movement along the edge doesn't count.
             st = self._fillet_state
-            c = np.asarray(st["mids"][0], float)
-            out = st["outward"]
             p0 = st["start_screen"]
-            dx, dy = float(p.x() - p0[0]), float(p0[1] - p.y())  # screen y up
-            if out is not None:
-                r, u = self.camera.right, self.camera.up
-                nx, ny = float(out @ r), float(out @ u)
-                d_px = abs(dx * nx + dy * ny)
-                depth = max(1.0, abs(float(np.dot(c - self.camera.eye, self.camera.back))))
-                px_per_world = self.height() / (2.0 * depth * FOV_TAN)
-            else:
-                # No resolved face normal: fall back to total screen drag distance.
-                d_px = float(np.hypot(dx, dy))
-                depth = max(1.0, abs(float(np.dot(c - self.camera.eye, self.camera.back))))
-                px_per_world = self.height() / (2.0 * depth * FOV_TAN)
-            if d_px < 1e-9:
-                st["radius"] = 0.0
-            else:
-                st["radius"] = d_px / px_per_world
-            self.fillet_preview.emit(st["radius"], st["mids"])
+            d_world, st["dir"] = self._edge_drag(st, float(p.x() - p0[0]), float(p0[1] - p.y()))
+            st["radius"] = abs(d_world)
+            st["kind"] = "chamfer" if d_world > 0 else "fillet"
+            self.fillet_preview.emit(st["radius"], st["mids"], st["kind"])
         elif btn == Qt.RightButton or (btn == Qt.LeftButton and (self.left_orbits or alt or self._cube_press)
                                       and not mods & Qt.ShiftModifier):
             self.camera.orbit(-d.x() * 0.4, -d.y() * 0.4)
         elif btn == Qt.MiddleButton or (btn == Qt.LeftButton and mods & Qt.ShiftModifier):
             self.camera.pan(d.x(), d.y(), self.height())
         self.update()
+
+    def _edge_drag(self, st, dx: float, dy: float):
+        """(signed world distance, box direction) for a screen drag (dx, dy; y up) on an edge.
+
+        Positive is a pull away from the body. The drag counts only across the edge on screen;
+        "away" is the side the edge's away-from-material direction shows on. When that barely
+        shows (the direction points at the viewer), dragging up the screen counts as pulling."""
+        c = np.asarray(st["mids"][0], float)
+        away, t = st["away"], st.get("tangent")
+        w, h = self.width(), self.height()
+        step = max(1e-3 * self.camera.dist, 1e-4)
+        s0 = self.camera.project(c.reshape(1, 3), w, h)[0]
+
+        def on_screen(v):  # screen px (y up) per world mm along v, perspective included
+            q = self.camera.project((c + v * step).reshape(1, 3), w, h)[0] - s0
+            return np.array([q[0], -q[1]]) / step
+
+        depth = max(1.0, abs(float(np.dot(c - self.camera.eye, self.camera.back))))
+        px_per_mm = h / (2.0 * depth * FOV_TAN)
+        tv = on_screen(t) if t is not None else np.zeros(2)
+        n = float(np.hypot(*tv))
+        m = np.array([-tv[1], tv[0]]) / n if n > 1e-3 * px_per_mm else np.array([0.0, 1.0])
+        across = float(on_screen(away) @ m) if away is not None else 0.0  # px per mm pulled
+        if abs(across) >= 0.3 * px_per_mm:
+            d_world = (dx * m[0] + dy * m[1]) / across
+            box_dir = away * (1.0 if d_world > 0 else -1.0)
+        else:  # away barely shows: up the screen is a pull
+            up = 1.0 if (m[1] > 1e-6 or (abs(m[1]) <= 1e-6 and m[0] > 0)) else -1.0
+            d_world = up * (dx * m[0] + dy * m[1]) / px_per_mm
+            box_dir = None
+        return d_world, box_dir
 
     # -- value box (type while dragging)
     def _typed_live(self):
@@ -700,7 +714,7 @@ class Viewport(QOpenGLWidget):
             return "extrude", s["center"], s["normal"], self._extrude_dist, True
         if self._fillet_state is not None and (self._dragged or self._fillet_state.get("typed")):
             s = self._fillet_state
-            return "fillet", np.asarray(s["mids"][0], float), s["outward"], s["radius"], True
+            return s["kind"], np.asarray(s["mids"][0], float), s["dir"], s["radius"], True
         if self._value_post is not None:
             p = self._value_post
             return p["kind"], p["base"], p["dir"], p["value"], False
@@ -777,7 +791,7 @@ class Viewport(QOpenGLWidget):
         elif kind == "fillet" and mm > 1e-4:
             st = self._fillet_state
             st["radius"] = mm
-            self.fillet_preview.emit(mm, st["mids"])
+            self.fillet_preview.emit(mm, st["mids"], st["kind"])
         self.update()
 
     def _on_box_accepted(self, mm: float):
@@ -849,9 +863,9 @@ class Viewport(QOpenGLWidget):
         self._fillet_state = None
         r = st["radius"]
         if r > 1e-4:  # (a 0 radius leaves any extrude box from the same press alone)
-            self._value_post = {"kind": "fillet", "base": np.asarray(st["mids"][0], float),
-                                "dir": st["outward"], "value": r}
-        self.fillet_commit.emit(r, st["mids"])  # 0 rolls back a live preview
+            self._value_post = {"kind": st["kind"], "base": np.asarray(st["mids"][0], float),
+                                "dir": st["dir"], "value": r}
+        self.fillet_commit.emit(r, st["mids"], st["kind"])  # 0 rolls back a live preview
 
     def mouseReleaseEvent(self, e):
         if self._press is not None and not self._dragged:

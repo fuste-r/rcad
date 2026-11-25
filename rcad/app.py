@@ -253,6 +253,8 @@ class MainWindow(QMainWindow):
         self._fillet_preview_r = None
         self._fillet_is_mod = False  # current drag edits an existing fillet
         self._fillet_mod_prev = None  # fillet radius before the modify drag
+        self._fillet_mod_prev_kind = None  # its kind before the drag (a pull turns it into a chamfer)
+        self._fillet_preview_kind = None  # kind at the last live rebuild
         QShortcut(QKeySequence(Qt.Key_Escape), self, self.cancel)
         self.resize(1300, 800)
         self.set_mode("model")
@@ -1761,7 +1763,7 @@ class MainWindow(QMainWindow):
     def on_value_edit(self, kind: str, value: float):
         """A size typed into the value box left on the model after a drag."""
         f = self._value_feature
-        expected = {"extrude": "pushpull", "fillet": "fillet"}.get(kind)
+        expected = {"extrude": "pushpull", "fillet": "fillet", "chamfer": "chamfer"}.get(kind)
         if f is None or f.kind != expected or not any(x is f for x in self.doc.features):
             self._value_feature = None  # gone (undo, delete, reload): nothing to edit
             self.view.dismiss_value_box()
@@ -1770,7 +1772,7 @@ class MainWindow(QMainWindow):
         if scrub is not None and scrub[0] is not f:
             scrub = None
         prev = scrub[1] if scrub is not None else f.value
-        if (kind == "fillet" and value <= 1e-4) or abs(value) < 0.01:
+        if (kind in ("fillet", "chamfer") and value <= 1e-4) or abs(value) < 0.01:
             self.statusBar().showMessage("Value too small", 5000)
             if scrub is not None:  # put back the size from before the scrub
                 f.value = prev
@@ -1799,10 +1801,10 @@ class MainWindow(QMainWindow):
     def on_value_scrub(self, kind: str, value: float):
         """Live size while the value box left after a drag is scrubbed; on_value_edit finishes it."""
         f = self._value_feature
-        expected = {"extrude": "pushpull", "fillet": "fillet"}.get(kind)
+        expected = {"extrude": "pushpull", "fillet": "fillet", "chamfer": "chamfer"}.get(kind)
         if f is None or f.kind != expected or not any(x is f for x in self.doc.features):
             return
-        if (kind == "fillet" and value <= 1e-4) or abs(value) < 0.01:
+        if (kind in ("fillet", "chamfer") and value <= 1e-4) or abs(value) < 0.01:
             return
         if self._scrub_prev is None or self._scrub_prev[0] is not f:
             self._scrub_prev = (f, f.value)
@@ -1820,6 +1822,7 @@ class MainWindow(QMainWindow):
         was_mod = self._fillet_is_mod
         if was_mod:
             f.value = float(self._fillet_mod_prev)
+            f.kind = self._fillet_mod_prev_kind or "fillet"
             f.version += 1
         else:
             self.doc.features.pop(idx)
@@ -1829,6 +1832,8 @@ class MainWindow(QMainWindow):
         self._fillet_preview_r = None
         self._fillet_is_mod = False
         self._fillet_mod_prev = None
+        self._fillet_mod_prev_kind = None
+        self._fillet_preview_kind = None
         self.rebuild()
         if was_mod:
             f.result_edges = self._fillet_result_edges(f)
@@ -1961,8 +1966,11 @@ class MainWindow(QMainWindow):
                     best, best_d = i, d
         return best
 
-    def on_fillet_commit(self, radius: float, mids: list):
-        """Finalize a drag: commit a new fillet, or edit an existing fillet's radius.
+    def on_fillet_commit(self, radius: float, mids: list, kind: str = "fillet"):
+        """Finalize an edge drag: commit a new fillet/chamfer, or edit an existing fillet.
+
+        ``kind`` is "fillet" when the drag pushed toward the body and "chamfer" when it pulled
+        away; dragging an existing fillet the other way turns it into a chamfer.
 
         - New fillet: the live temp feature is finalized in place; if the fillet
           is still failing at release the temp feature is rolled back so the model
@@ -1973,30 +1981,33 @@ class MainWindow(QMainWindow):
         """
         mids = [tuple(map(float, m)) for m in mids]
         self._value_feature = None
-        f = self._fillet_commit_feature(radius, mids)
-        # The value box stays on the model only if the fillet exists at the dragged radius.
-        if f is not None and any(x is f for x in self.doc.features) and abs(f.value - radius) < 1e-9:
+        f = self._fillet_commit_feature(radius, mids, kind)
+        # The value box stays on the model only if the feature exists at the dragged size.
+        if (f is not None and any(x is f for x in self.doc.features) and abs(f.value - radius) < 1e-9
+                and f.kind == kind):
             self._value_feature = f
         else:
             self.view.dismiss_value_box()
 
-    def _fillet_commit_feature(self, radius: float, mids: list):
-        """on_fillet_commit's work; returns the fillet feature it made or edited, if any."""
+    def _fillet_commit_feature(self, radius: float, mids: list, kind: str = "fillet"):
+        """on_fillet_commit's work; returns the fillet/chamfer feature it made or edited, if any."""
         if self._fillet_live_idx is not None:
             idx = self._fillet_live_idx
             f = self.doc.features[idx]
             if self._fillet_is_mod:
                 if radius > 1e-4:
+                    f.kind = kind
                     f.value = float(radius)
                     f.version += 1
                     self.rebuild()
                     if idx in self.doc.errors:
-                        # New radius invalid: revert to the pre-drag radius.
+                        # New size invalid: back to the pre-drag fillet.
                         f.value = float(self._fillet_mod_prev or f.value)
+                        f.kind = self._fillet_mod_prev_kind or "fillet"
                         f.version += 1
                         self.rebuild()
                         f.result_edges = self._fillet_result_edges(f)
-                        QMessageBox.warning(self, "Edit fillet", "Radius reverted (the fillet failed at the new size).")
+                        QMessageBox.warning(self, f"Edit {kind}", "Reverted (it failed at the new size).")
                     else:
                         f.result_edges = self._fillet_result_edges(f)
                 else:
@@ -2005,6 +2016,7 @@ class MainWindow(QMainWindow):
                     self.rebuild()
             else:
                 if radius > 1e-4:
+                    f.kind = kind
                     f.value = float(radius)
                     f.version += 1
                     self.rebuild()
@@ -2020,17 +2032,22 @@ class MainWindow(QMainWindow):
             self._fillet_preview_r = None
             self._fillet_is_mod = False
             self._fillet_mod_prev = None
+            self._fillet_mod_prev_kind = None
+            self._fillet_preview_kind = None
             return f
         if radius > 1e-4:
-            feature = Feature("fillet", value=float(radius), edges=mids,
+            feature = Feature(kind, value=float(radius), edges=mids,
                               edge_dirs=self._fillet_edge_dirs(mids), edge_refs=self._fillet_edge_refs(mids))
             if self.commit(feature):
                 feature.result_edges = self._fillet_result_edges(feature)
                 return feature
         return None
 
-    def on_fillet_preview(self, radius: float, mids: list):
-        """Live fillet: keep the feature in the history while dragging.
+    def on_fillet_preview(self, radius: float, mids: list, kind: str = "fillet"):
+        """Live fillet/chamfer: keep the feature in the history while dragging.
+
+        ``kind`` follows the drag direction (push: fillet, pull: chamfer) and may change
+        mid-drag; the live feature switches with it.
 
         The first move decides whether the drag edits an existing fillet (the
         selected edge's mid matches a fillet feature's result_edges) or creates
@@ -2046,15 +2063,18 @@ class MainWindow(QMainWindow):
                 self._fillet_live_idx = mod_idx
                 self._fillet_is_mod = True
                 self._fillet_mod_prev = self.doc.features[mod_idx].value
+                self._fillet_mod_prev_kind = self.doc.features[mod_idx].kind
             else:
-                self.doc.features.append(Feature("fillet", value=float(radius), edges=mids,
+                self.doc.features.append(Feature(kind, value=float(radius), edges=mids,
                                                  edge_dirs=self._fillet_edge_dirs(mids),
                                                  edge_refs=self._fillet_edge_refs(mids)))
                 self._fillet_live_idx = len(self.doc.features) - 1
             self._fillet_preview_r = None
-        elif self._fillet_preview_r is not None and abs(radius - self._fillet_preview_r) < 0.05:
+        elif (self._fillet_preview_r is not None and abs(radius - self._fillet_preview_r) < 0.05
+              and kind == self._fillet_preview_kind):
             return  # not worth a rebuild this frame
         f = self.doc.features[self._fillet_live_idx]
+        f.kind = kind
         f.value = float(radius)
         f.version += 1
         sel_edges = set(self.view.sel_edges)
@@ -2065,6 +2085,7 @@ class MainWindow(QMainWindow):
         if self._fillet_is_mod:
             f.result_edges = self._fillet_result_edges(f)
         self._fillet_preview_r = radius
+        self._fillet_preview_kind = kind
 
     def _edge_feature(self, kind):
         if not self.view.sel_edges:

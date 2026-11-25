@@ -43,6 +43,8 @@ On Wayland with NVIDIA, if the OpenGL context fails to create, try `QT_QPA_PLATF
 | Standard view (Top, Bottom, Front, Back, Left, Right) | click a face of the cube in the top-right corner; drag the cube to orbit |
 | Multi-select | Ctrl + click |
 | Cancel / clear selection | Esc |
+| Push/pull a face | select it, then drag it |
+| Fillet or chamfer an edge | drag the edge across itself: toward the body (push) rounds it, away from the body (pull) bevels it; you can switch direction mid-drag. Dragging a fillet's rounded edge resizes it, and pulling it turns it into a chamfer. If the body side can't be seen (the edge faces you), dragging up the screen counts as a pull |
 | Exact size while dragging a face or edge | type a value (units, maths and variables work: `2in + 5mm`, `wall * 2`), then Enter or click; Esc cancels |
 | Change the size just made | click the value box left on the model and type, or drag it sideways to scrub (Shift: fine, Ctrl: coarse) |
 | Exact size while drawing a line, rectangle, or circle | after the first click, type a size; Tab / Shift+Tab move between sizes (length and angle, width and height, diameter); Enter or a click places it. The sizes stay on the new shape (or on a line chain's last segment after Esc): retype or scrub them to resize it, click elsewhere to put them away |
