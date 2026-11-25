@@ -4,11 +4,11 @@ import math
 import sys
 
 import numpy as np
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QPoint, QSettings, Qt
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut, QSurfaceFormat
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDockWidget, QFileDialog,
-    QFormLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
+    QFormLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
     QPushButton, QTextEdit,
     QToolBar, QWidget,
     QVBoxLayout,
@@ -248,6 +248,7 @@ class MainWindow(QMainWindow):
         self._restoring = False
         self._mirror_axis = None   # (a_idx, b_idx, line_idx) for symmetry tool
         self._mirroring = False
+        self.selection_menu = None  # the last right-click tools menu
         self._sketch_undo: dict[int, list[dict]] = {}
         self._sketch_redo: dict[int, list[dict]] = {}
         self._sketch_restoring = False
@@ -1561,6 +1562,9 @@ class MainWindow(QMainWindow):
 
     # ---- model mode
     def on_click(self, x, y, button, mods):
+        if button == Qt.RightButton:
+            self.step_back(x, y)
+            return
         if button != Qt.LeftButton:
             return
         if self.mode == "sketch":
@@ -1587,6 +1591,77 @@ class MainWindow(QMainWindow):
         elif face is not None:
             v.sel_faces.symmetric_difference_update({face})
         self._update_regions()
+
+    # -- right-click
+    def step_back(self, x, y) -> str:
+        """Right-click (without dragging): undo the last step of what is in progress, or offer tools.
+
+        In order: an open settings-bar tool is cancelled; in a sketch a half-drawn shape (or a
+        mirror pick) is dropped, then the drawing tool is left. With something selected, or
+        something under the pointer (which is then selected), its tools open at the pointer.
+        Otherwise right-click leaves the sketch. Returns what it did, for tests."""
+        if self._session is not None:
+            self._cancel_session()
+            return "cancel tool"
+        if self.mode == "sketch":
+            if self.pending is not None or self._mirror_axis is not None:
+                self.cancel()
+                return "drop step"
+            if self.tool != "select":
+                self.set_tool("select")
+                return "leave tool"
+        self._select_under(x, y)
+        if self._open_selection_menu(x, y):
+            return "menu"
+        if self.mode == "sketch":
+            self.finish_sketch()
+            return "exit sketch"
+        return "nothing"
+
+    def _select_under(self, x, y):
+        """Select what is under the pointer, unless it is already part of the selection."""
+        v = self.view
+        if self.mode == "sketch":
+            hit = v.pick_sketch(x, y)
+            if hit is not None and hit not in v.sketch_sel:
+                v.sketch_sel.clear()
+                v.sketch_sel.add(hit)
+                self._update_regions()
+            return
+        edge = v.pick_edge(x, y)
+        if edge is not None:
+            if edge not in v.sel_edges:
+                self.on_click(x, y, Qt.LeftButton, Qt.NoModifier)
+            return
+        hit = self._pick_region(x, y)
+        if hit is not None:
+            i, r, _ = hit
+            if r not in self.doc.features[i].sketch.selected_regions():
+                self.on_click(x, y, Qt.LeftButton, Qt.NoModifier)
+            return
+        face = v.pick_face(x, y)
+        if face is not None and face not in v.sel_faces:
+            self.on_click(x, y, Qt.LeftButton, Qt.NoModifier)
+
+    def _open_selection_menu(self, x, y) -> bool:
+        """Pop up the selection's tools (the quick buttons' list) at view point (x, y)."""
+        spec = self._quick_spec()
+        if spec is None:
+            return False
+        _, _, primary, more, delete = spec
+        menu = QMenu(self.view)
+        for group in (primary, more, [delete] if delete is not None else []):
+            if group and menu.actions():
+                menu.addSeparator()
+            for label, slot, tip in group:
+                if label == "🗑":
+                    label = "🗑 Delete"
+                a = menu.addAction(label)
+                a.setToolTip(tip)
+                a.triggered.connect(lambda _=False, s=slot: s())
+        self.selection_menu = menu
+        menu.popup(self.view.mapToGlobal(QPoint(int(x), int(y))))
+        return True
 
     def on_wheel_adjust(self, x, y, delta, mods):
         edge = self.view.hover_edge
