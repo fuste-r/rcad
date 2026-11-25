@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from PySide6.QtCore import QEvent, QObject, Qt
+from PySide6.QtCore import QEvent, QObject, Qt, Signal
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QToolButton, QWidget
 
 from .units import Unit
@@ -87,6 +87,8 @@ class ScrubField(NumberField):
 class ToolSettingsBar(QFrame):
     """Bar of the active tool's settings, centred along the bottom of its parent (the view)."""
 
+    active_changed = Signal(bool)  # shown for a tool (True) / put away (False)
+
     def __init__(self, parent: QWidget, unit_fn: Callable[[], Unit], variables_fn: Callable[[], dict]):
         super().__init__(parent)
         self._unit_fn = unit_fn
@@ -160,6 +162,7 @@ class ToolSettingsBar(QFrame):
         self._layout.addWidget(self.cross)
         self.active = True
         self._error = None
+        self.active_changed.emit(True)
         self._update_tick()
         self.show()
         self.raise_()
@@ -170,8 +173,11 @@ class ToolSettingsBar(QFrame):
 
     def end(self):
         self._clear()
+        was = self.active
         self.active = False
         self.hide()
+        if was:
+            self.active_changed.emit(False)
 
     def values(self) -> dict | None:
         """Every setting by key (numbers in mm or degrees), or None while a number is invalid."""

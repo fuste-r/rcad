@@ -27,6 +27,7 @@ from .sketch import (
 from .units import MM, UNITS
 from .theme import CHOICES, apply_choice
 from .tool_bar import Choice, Number, ToolSettingsBar
+from .tool_line import ToolLine
 from .value_box import FieldSet, NumberField
 from .viewport import Viewport
 
@@ -274,9 +275,7 @@ class MainWindow(QMainWindow):
 
     def _build_actions(self):
         self._build_file_toolbar()
-        self._build_model_toolbar()
-        self._build_sketch_toolbar()
-        self._build_constraint_toolbar()
+        self._build_tool_line()
 
     def _build_file_toolbar(self):
         file_tb = self.addToolBar("File")
@@ -311,67 +310,89 @@ class MainWindow(QMainWindow):
         self.theme_combo.currentTextChanged.connect(lambda t: self.set_theme(t.lower()))
         file_tb.addWidget(self.theme_combo)
 
-    def _build_model_toolbar(self):
-        self.model_tb = QToolBar("Model")
-        self.addToolBar(self.model_tb)
-        self.plane_combo = QComboBox()
-        self.plane_combo.addItems(["XY", "XZ", "YZ", "Selected face"])
-        self.model_tb.addWidget(QLabel(" Sketch on: "))
-        self.model_tb.addWidget(self.plane_combo)
-        for text, slot, tip in [
-            ("✏️", self.new_sketch, "Start a sketch on the chosen plane or the selected planar face"),
-            ("⇈", self.extrude, "Extrude the selected (or last) sketch"),
-            ("⟳", self.revolve, "Revolve the selected (or last) sketch"),
-            ("↝", self.sweep, "Sweep a sketch profile along a sketch path"),
-            ("⌁", self.loft, "Loft between sketch sections"),
-            ("↕️", self.pushpull, "Move the selected planar face along its normal"),
-            ("◐", self.fillet, "Round the selected edges"),
-            ("◺", self.chamfer, "Bevel the selected edges"),
-            ("🗑", self.delete_feature, "Delete the highlighted feature"),
-            ("⛶", self.view.frame_all, "Fit the model in view"),
-        ]:
-            self.model_tb.addAction(self._act(text, slot, tip))
+    def _build_tool_line(self):
+        """Every modelling tool in one grouped line along the bottom of the view."""
+        line = self.tool_line = ToolLine(self.view)
+        act = self._act
 
-    def _build_sketch_toolbar(self):
-        self.sketch_tb = QToolBar("Sketch")
-        self.addToolBar(Qt.TopToolBarArea, self.sketch_tb)
+        # model page
+        line.add_page("model")
+        # The plane choice behind the Sketch list (also set directly by tests and scripts)
+        self.plane_combo = QComboBox(self)
+        self.plane_combo.addItems(["XY", "XZ", "YZ", "Selected face"])
+        self.plane_combo.hide()
+
+        def sketch_on(plane):
+            return lambda _=False: (self.plane_combo.setCurrentText(plane), self.new_sketch())
+        line.add_group("model", "Sketch", [
+            act("✏️ On XY (floor)", sketch_on("XY"), "Start a sketch on the XY plane"),
+            act("✏️ On XZ (front)", sketch_on("XZ"), "Start a sketch on the XZ plane"),
+            act("✏️ On YZ (side)", sketch_on("YZ"), "Start a sketch on the YZ plane"),
+            act("✏️ On selected face", sketch_on("Selected face"), "Start a sketch on the selected planar face"),
+        ])
+        line.add_group("model", "Create", [
+            act("⇈ Extrude", self.extrude, "Extrude the selected (or last) sketch"),
+            act("⟳ Revolve", self.revolve, "Revolve the selected (or last) sketch"),
+            act("↝ Sweep", self.sweep, "Sweep a sketch profile along a sketch path"),
+            act("⌁ Loft", self.loft, "Loft between sketch sections"),
+        ])
+        line.add_group("model", "Modify", [
+            act("↕️ Push/Pull", self.pushpull, "Move the selected planar face along its normal"),
+            act("◐ Fillet", self.fillet, "Round the selected edges"),
+            act("◺ Chamfer", self.chamfer, "Bevel the selected edges"),
+            None,
+            act("🗑 Delete feature", self.delete_feature, "Delete the highlighted feature"),
+        ])
+        line.add_separator("model")
+        line.add_action("model", act("⛶ Fit", self.view.frame_all, "Fit the model in view"))
+
+        # sketch page
+        line.add_page("sketch")
         group = QActionGroup(self)
         self.tool_actions = {}
-        for name, text in [("select", "⌖"), ("line", "╱"), ("rect", "⬜"), ("circle", "◯")]:
-            a = self._act(text, lambda _=False, n=name: self.set_tool(n), checkable=True)
+        draw = []
+        for name, text in [("select", "⌖ Select"), ("line", "╱ Line"), ("rect", "⬜ Rectangle"),
+                           ("circle", "◯ Circle")]:
+            a = act(text, lambda _=False, n=name: self.set_tool(n), checkable=True)
             group.addAction(a)
             a.setChecked(name == "select")
             self.tool_actions[name] = a
-            self.sketch_tb.addAction(a)
-        self.sketch_tb.addSeparator()
+            draw.append(a)
+        self.draw_button = line.add_group("sketch", "Draw", draw)
+        tips = {"Symmetry": "Two-step: 1) click mirror line, 2) click points/lines to mirror, press Symmetry again."}
+        constraints = []
+        for item in [
+                ("Horizontal", "horizontal"), ("Vertical", "vertical"), ("Coincident", "coincident"),
+                ("Parallel", "parallel"), ("Perpendicular", "perpendicular"), ("Equal", "equal"), None,
+                ("Distance", "distance"), ("Spacing", "spacing"), ("Diameter", "diameter"),
+                ("Expression", "expression"), None,
+                ("Symmetry", "symmetry"), ("Fixed", "fixed"), ("Point on line", "point_on_line")]:
+            if item is None:
+                constraints.append(None)
+                continue
+            text, kind = item
+            constraints.append(act(text, lambda _=False, k=kind: self.add_constraint(k),
+                                   tips.get(text, f"Add a {kind} constraint to the selection")))
+        line.add_group("sketch", "Constrain", constraints)
+        line.add_group("sketch", "Modify", [
+            act("🗑 Delete selection", self.delete_selection, "Delete selected sketch items"),
+            act("🗑 Delete constraint", self.delete_constraint, "Delete the constraint highlighted in the list"),
+        ])
+        line.add_separator("sketch")
         self.snap = NumberField(1.0, "length", MM, lo=0.0, hi=1e4)
-        self.snap.setFixedWidth(90)
+        self.snap.setFixedWidth(80)
         self.snap.HINT = "Grid snap (0 = off). " + NumberField.HINT
         self.snap.setToolTip(self.snap.HINT)
-        self.sketch_tb.addWidget(QLabel(" snap "))
-        self.sketch_tb.addWidget(self.snap)
-        self.sketch_tb.addSeparator()
-        self.sketch_tb.addAction(self._act("🗑 sel", self.delete_selection, "Delete selected sketch items"))
-        self.sketch_tb.addAction(self._act("🗑 ct", self.delete_constraint))
-        self.sketch_tb.addSeparator()
-        self.sketch_tb.addAction(self._act("⇈", self.extrude_from_sketch,
-                                           "Extrude the highlighted regions (Select tool: click a region to highlight it)"))
-        self.sketch_tb.addAction(self._act("✓ Done", self.finish_sketch))
+        snap_label = QLabel(" Snap ")
+        line.add_widget("sketch", snap_label)
+        line.add_widget("sketch", self.snap)
+        line.add_separator("sketch")
+        line.add_action("sketch", act("⇈ Extrude", self.extrude_from_sketch,
+                                      "Extrude the highlighted regions (Select tool: click a region to highlight it)"))
+        line.add_action("sketch", act("✓ Exit sketch", self.finish_sketch, "Finish the sketch"))
 
-    def _build_constraint_toolbar(self):
-        self.addToolBarBreak(Qt.TopToolBarArea)
-        self.constraint_tb = QToolBar("Constraints")
-        self.addToolBar(Qt.TopToolBarArea, self.constraint_tb)
-        tips = {
-            "Symmetry": "Two-step: 1) click mirror line, 2) click points/lines to mirror, press Symmetry again."
-        }
-        for text, kind in [
-            ("Horizontal", "horizontal"), ("Vertical", "vertical"), ("Coincident", "coincident"),
-            ("Parallel", "parallel"), ("Perpend.", "perpendicular"), ("Equal", "equal"),
-            ("Distance", "distance"), ("Expression", "expression"), ("Symmetry", "symmetry"), ("Spacing", "spacing"), ("Diameter", "diameter"), ("Fixed", "fixed"),
-            ("Point on line", "point_on_line")]:
-            tip = tips.get(text, f"Add a {kind} constraint to the selection")
-            self.constraint_tb.addAction(self._act(text, lambda _=False, k=kind: self.add_constraint(k), tip))
+        # a tool's settings bar takes the line's place while it is open
+        self.tool_bar.active_changed.connect(line.set_suppressed)
 
     # ---- units
     @property
@@ -441,9 +462,7 @@ class MainWindow(QMainWindow):
         self.fields.stop()
         self.mode = mode
         sketching = mode == "sketch"
-        self.model_tb.setVisible(not sketching)
-        self.sketch_tb.setVisible(sketching)
-        self.constraint_tb.setVisible(sketching)
+        self.tool_line.set_page("sketch" if sketching else "model")
         self.constraint_dock.setVisible(sketching)
         self.view.left_orbits = not sketching
         self.view.camera.ortho = sketching
@@ -658,6 +677,7 @@ class MainWindow(QMainWindow):
 
     def set_tool(self, name):
         self.tool_actions[name].setChecked(True)
+        self.draw_button.setText(f"Draw: {self.tool_actions[name].text().split(' ', 1)[1]} ▾")
         self.tool = name
         self.pending = None
         self.fields.stop()
