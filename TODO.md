@@ -19,6 +19,27 @@
 - [ ] Add sketch arcs, trim/split/offset tools, construction geometry, and projected model edges. Support closed profiles that combine lines, arcs, and circles.
 - [ ] Add common sketch constraints such as angle, radius, tangent, and concentric, with solver status and expression support where applicable.
 
+## P1: Feel and flow (ideas from superGeometry.app)
+
+Interaction ideas taken from superGeometry.app's README (Nov 2026). Several of them describe how to do the P1 interaction items above.
+
+- [ ] Type while dragging: every drag or draw shows a value box by the pointer that stays after release. Typing a number goes into it, Tab moves to the next size, Enter confirms, and dragging the box left or right scrubs the value. Every number field accepts units (`2in`, `5cm`), arithmetic (`40/3 + 2`), and variables (`wall * 2`).
+- [ ] Replace feature dialogs with a tool bar that becomes the active tool's settings: values you can tap and type or drag, option words to toggle, a tick to finish and a cross to cancel.
+- [ ] Quick buttons beside the current selection: its two likeliest next tools (flat face → Sketch, Push/Pull; edge → Fillet, Chamfer; body → Move, Mirror), then Delete and More. Show only the tools that apply to the selection.
+- [ ] Hover previews: with the pointer over a tool button, draw a dashed preview of what it would do to the current selection before the tool starts.
+- [ ] Sketch regions: overlapping closed shapes split into separately selectable regions. Clicking a region shows the extrude arrow right away, the region itself can be dragged, more regions can be added while the distance is still 0, and construction geometry never makes regions.
+- [ ] Auto extrude operation: decide new body, add, or cut from the drag direction (on a plane, up is a new body and down is a cut; on a face, out adds and in cuts), with an explicit override. Start at the last-used distance.
+- [ ] Right-click steps back: first a half-finished entity or pick, then the active tool, then out of the sketch. With something selected, right-click opens its tools at the pointer.
+- [ ] Selection shortcuts: double-click selects the whole body, Ctrl+A selects everything, drag a box on empty space to select several, and a tag names what is picked.
+- [ ] Navigation: mouse presets matching other CAD programs (Onshape, Fusion, SolidWorks, Blender, FreeCAD, and others), a settable orbit centre, 90° turn buttons on the view cube, double-click the cube to fit, and saved views.
+- [ ] Smooth onboarding: a new project opens in a sketch on XY looking down with Line active, and leaving a sketch swings to a three-quarter view.
+- [ ] Strict constraints: refuse a constraint or typed value that contradicts the existing ones, with a message, instead of distorting the sketch. Draw constraint marks small, faint, and colour-coded by kind, and keep them from catching clicks meant for geometry.
+- [ ] Grid snapping whose step follows the zoom level (for example 1, 5, or 10 mm).
+- [ ] Variable tags on the model: show where each variable acts, and let a tag be clicked to type a value or dragged to change it with the model following live.
+- [ ] History panel: hovering a step outlines the faces and edges it uses, steps can be grouped and folded, an eye suppresses a step, and a failed step turns red and says why.
+- [ ] Run rebuilds off the UI thread, with a "Working…" indicator and a Stop button that cancels the rebuild and reverts the change that started it.
+- [ ] A complete keyboard shortcut set (S sketch, L line, R rectangle, C circle, E extrude, F fillet, T trim, M move, and others) and a short built-in tutorial that walks through a first part.
+
 ## P1: Modeling
 
 - [x] Add a revolve feature using a sketch profile and selectable axis. Cover add/cut modes, rebuilds, and project-file round trips.
@@ -27,6 +48,14 @@
 - [ ] Add explicit boolean intersection and improve body-aware union/subtract workflows. Keep disconnected solids independently selectable and editable.
 - [ ] Add construction planes and axes, then parametric move/rotate/mirror/pattern/split-body features.
 - [ ] Extend push/pull beyond planar faces where the geometry kernel supports a predictable result. Otherwise, make unsupported face types explicit in the UI and error messages.
+- [ ] Extrude taper: a far-end scale percentage, so a pyramid or cone takes one step.
+- [ ] Revolve with travel along the axis for threads and springs (angles above 360°).
+- [ ] Hole tool with ISO screw presets (M2 to M12; plain, counterbore, countersink), through or to a depth, with editable sizes and positions measured from the nearest edges.
+- [ ] Thread tool for round faces and holes, using the ISO coarse pitch by default, with a left-hand option and a lead-in at free ends.
+- [ ] Move/rotate gimbals for bodies (with a Copy option) and for faces. Delete or replace a face, fillet, or chamfer so the neighbouring faces extend until they meet.
+- [ ] More sketch tools: splines (including freehand strokes cleaned up into a few lines, arcs, and curves), ellipses, polygons, sketch fillet and chamfer, sketch move/rotate/scale, and linear and circular sketch patterns.
+- [ ] Per-body colour and transparency, plus isolate.
+- [ ] Export 3MF (keeping body names and colours) and export sketches as DXF, with construction geometry on its own layer.
 
 ## P2: Workflow and inspection
 
