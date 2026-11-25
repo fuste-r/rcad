@@ -271,6 +271,10 @@ class MainWindow(QMainWindow):
         self.view.extrude_commit.connect(self.on_extrude_commit)
         self.view.fillet_commit.connect(self.on_fillet_commit)
         self.view.fillet_preview.connect(self.on_fillet_preview)
+        self.view.fillet_cancel.connect(self.on_fillet_cancel)
+        self.view.value_edit.connect(self.on_value_edit)
+        self.view.variables_source = lambda: self.doc.variables
+        self._value_feature = None  # feature made by the last drag; its value box can retype it
         self.view.sketch_mouse.connect(self.on_sketch_mouse)
 
         self.features = QListWidget()
@@ -1435,9 +1439,66 @@ class MainWindow(QMainWindow):
 
     def on_extrude_commit(self, dist: float, center: tuple, normal: tuple):
         """Drag-to-extrude: commit a pushpull feature from the drag distance."""
+        self._value_feature = None
         if abs(dist) < 0.01:
+            self.view.dismiss_value_box()
             return
-        self.commit(Feature("pushpull", value=dist, face=(center, normal)))
+        feature = Feature("pushpull", value=dist, face=(center, normal))
+        if self.commit(feature):
+            self._value_feature = feature
+        else:
+            self.view.dismiss_value_box()
+
+    def on_value_edit(self, kind: str, value: float):
+        """A size typed into the value box left on the model after a drag."""
+        f = self._value_feature
+        expected = {"extrude": "pushpull", "fillet": "fillet"}.get(kind)
+        if f is None or f.kind != expected or not any(x is f for x in self.doc.features):
+            self._value_feature = None  # gone (undo, delete, reload): nothing to edit
+            self.view.dismiss_value_box()
+            return
+        if (kind == "fillet" and value <= 1e-4) or abs(value) < 0.01:
+            self.statusBar().showMessage("Value too small", 5000)
+            self.view.set_post_value(f.value)
+            return
+        prev = f.value
+        self._push_undo()
+        f.value = float(value)
+        f.version += 1
+        self.rebuild()
+        idx = next(i for i, x in enumerate(self.doc.features) if x is f)
+        if idx in self.doc.errors:
+            msg = self.doc.errors[idx]
+            f.value = prev
+            f.version += 1
+            self._undo.pop()
+            self.rebuild()
+            self.view.set_post_value(prev)
+            QMessageBox.warning(self, "Operation failed", msg)
+        if f.kind == "fillet":
+            f.result_edges = self._fillet_result_edges(f)
+
+    def on_fillet_cancel(self):
+        """Esc during a fillet drag: put the history back as it was before the drag."""
+        idx = self._fillet_live_idx
+        if idx is None:
+            return
+        f = self.doc.features[idx]
+        was_mod = self._fillet_is_mod
+        if was_mod:
+            f.value = float(self._fillet_mod_prev)
+            f.version += 1
+        else:
+            self.doc.features.pop(idx)
+        if self._undo:
+            self._undo.pop()  # the snapshot pushed when the live preview started
+        self._fillet_live_idx = None
+        self._fillet_preview_r = None
+        self._fillet_is_mod = False
+        self._fillet_mod_prev = None
+        self.rebuild()
+        if was_mod:
+            f.result_edges = self._fillet_result_edges(f)
 
     def _fillet_edge_dirs(self, mids: list) -> list:
         """Aligned unit directions of picked edges; curved edges have no direction."""
@@ -1578,6 +1639,16 @@ class MainWindow(QMainWindow):
           value; dragging to ~0 removes the fillet.
         """
         mids = [tuple(map(float, m)) for m in mids]
+        self._value_feature = None
+        f = self._fillet_commit_feature(radius, mids)
+        # The value box stays on the model only if the fillet exists at the dragged radius.
+        if f is not None and any(x is f for x in self.doc.features) and abs(f.value - radius) < 1e-9:
+            self._value_feature = f
+        else:
+            self.view.dismiss_value_box()
+
+    def _fillet_commit_feature(self, radius: float, mids: list):
+        """on_fillet_commit's work; returns the fillet feature it made or edited, if any."""
         if self._fillet_live_idx is not None:
             idx = self._fillet_live_idx
             f = self.doc.features[idx]
@@ -1616,12 +1687,14 @@ class MainWindow(QMainWindow):
             self._fillet_preview_r = None
             self._fillet_is_mod = False
             self._fillet_mod_prev = None
-            return
+            return f
         if radius > 1e-4:
             feature = Feature("fillet", value=float(radius), edges=mids,
                               edge_dirs=self._fillet_edge_dirs(mids), edge_refs=self._fillet_edge_refs(mids))
             if self.commit(feature):
                 feature.result_edges = self._fillet_result_edges(feature)
+                return feature
+        return None
 
     def on_fillet_preview(self, radius: float, mids: list):
         """Live fillet: keep the feature in the history while dragging.

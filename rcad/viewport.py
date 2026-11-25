@@ -13,6 +13,7 @@ from .kernel import MeshData
 from .sketch import Sketch
 from .theme import LIGHT, Theme
 from .units import MM, Unit
+from .value_box import ValueBox
 
 DRAG_PX = 4
 
@@ -25,10 +26,13 @@ class Viewport(QOpenGLWidget):
     sketch_mouse = Signal(str, float, float)  # phase ("press"|"move"|"release"), x, y
     fillet_commit = Signal(float, list)  # radius_mm, [edge midpoints]
     fillet_preview = Signal(float, list)  # live radius_mm, [edge midpoints]
+    fillet_cancel = Signal()  # Esc during a drag: undo the live fillet
+    value_edit = Signal(str, float)  # kind ("extrude"|"fillet"), new mm typed after the drag
 
     def __init__(self):
         super().__init__()
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)  # so a number typed mid-drag reaches keyPressEvent
         self._dim_labels = []
         self.camera = Camera()
         self.theme: Theme = LIGHT
@@ -59,15 +63,15 @@ class Viewport(QOpenGLWidget):
         self._seg_edge = np.zeros(0, int)
         self._extrude_state = None  # {"face", "center", "normal", "start_screen", "outline"}
         self._extrude_dist = 0.0
-        self._extrude_label = QLabel(self)
-        self._extrude_label.setStyleSheet(
-            "color: #ffffff; background: rgba(0,128,0,180); padding: 2px 6px; "
-            "border-radius: 3px; font-weight: bold;")
         self._fillet_state = None  # {"mids", "outward", "start_screen", "radius"}
-        self._fillet_label = QLabel(self)
-        self._fillet_label.setStyleSheet(
-            "color: #ffffff; background: rgba(128,0,128,180); padding: 2px 6px; "
-            "border-radius: 3px; font-weight: bold;")
+        # Value box: shows the dragged size; typing a number sets it. After the drag
+        # it stays on the model (``_value_post``) so the new feature's size can be retyped.
+        self.variables_source = dict  # callable returning the document's variables (mm)
+        self.value_box = ValueBox(self, lambda: self.unit, lambda: self.variables_source())
+        self.value_box.edited.connect(self._on_box_edited)
+        self.value_box.accepted.connect(self._on_box_accepted)
+        self.value_box.cancelled.connect(self._on_box_cancelled)
+        self._value_post = None  # {"kind", "base", "dir", "value"} after a committed drag
 
     # -- data
     def set_mesh(self, mesh: MeshData | None):
@@ -334,7 +338,6 @@ class Viewport(QOpenGLWidget):
     def _draw_extrude_preview(self):
         """Draw the drag-to-extrude preview: offset face outline + drag axis."""
         if self._extrude_state is None or self.mesh is None:
-            self._extrude_label.hide()
             return
         c, n = self._extrude_state["center"], self._extrude_state["normal"]
         d = self._extrude_dist
@@ -378,14 +381,6 @@ class Viewport(QOpenGLWidget):
             GL.glEnd()
         GL.glLineWidth(1)
         GL.glEnable(GL.GL_LIGHTING)
-
-        # 4. Distance label (project end point to screen)
-        w, h = self.width(), self.height()
-        screen = self.camera.project(end, w, h)
-        x, y = screen[0], screen[1]
-        self._extrude_label.setText(f"{d:.2f} mm")
-        self._extrude_label.move(int(x) + 10, max(int(y) - 12, 2))
-        self._extrude_label.show()
 
     def _draw_sketch_geometry(self, sk: Sketch, selected: set, base_color):
         pl = sk.plane
@@ -553,6 +548,17 @@ class Viewport(QOpenGLWidget):
     # -- mouse
     def mousePressEvent(self, e):
         p = e.position()
+        self.setFocus()
+        if self._typed_live() is not None:
+            # A typed value is waiting for Enter: a click on the model confirms it.
+            v = self.value_box.value()
+            if v is None:
+                self._on_box_cancelled()
+            else:
+                self._on_box_accepted(v)
+            return
+        if self._value_post is not None:
+            self.dismiss_value_box()
         self._cube_press = e.button() == Qt.LeftButton and viewcube.inside(p.x(), p.y(), self._cube_rect())
         self._press = (p, e.button(), e.modifiers())
         self._last = p
@@ -585,7 +591,6 @@ class Viewport(QOpenGLWidget):
                     "start_screen": (p.x(), p.y()),
                     "radius": 0.0,
                 }
-                self._fillet_label.hide()
         # Sketch drag: report a plain left press in sketch mode to the app
         if (e.button() == Qt.LeftButton and not self._cube_press
                 and self.sketch is not None
@@ -620,7 +625,11 @@ class Viewport(QOpenGLWidget):
             return
         alt = bool(mods & Qt.AltModifier)
         # Drag-to-extrude takes priority: if a face is being dragged, ignore orbit/pan
-        if self._extrude_state is not None:
+        if self._extrude_state is not None and self._extrude_state.get("typed"):
+            pass  # a typed value overrides the mouse until Enter or Esc
+        elif self._fillet_state is not None and self._fillet_state.get("typed"):
+            pass
+        elif self._extrude_state is not None:
             # Screen-space drag: project cursor movement onto the face normal's
             # screen projection, then convert px to world units at the face depth.
             # (Projecting the cursor ray onto the plane reads ~0 in an ortho view,
@@ -662,7 +671,6 @@ class Viewport(QOpenGLWidget):
             else:
                 st["radius"] = d_px / px_per_world
             self.fillet_preview.emit(st["radius"], st["mids"])
-            self._show_fillet_label(st)
         elif btn == Qt.RightButton or (btn == Qt.LeftButton and (self.left_orbits or alt or self._cube_press)
                                       and not mods & Qt.ShiftModifier):
             self.camera.orbit(-d.x() * 0.4, -d.y() * 0.4)
@@ -670,21 +678,132 @@ class Viewport(QOpenGLWidget):
             self.camera.pan(d.x(), d.y(), self.height())
         self.update()
 
-    def _show_fillet_label(self, st):
-        """Place the live fillet-radius label near the first edge's outward point."""
-        radius = st["radius"]
-        if radius is None or abs(radius) < 1e-4:
-            self._fillet_label.hide()
+    # -- value box (type while dragging)
+    def _typed_live(self):
+        """'extrude' or 'fillet' when a drag's value was typed and awaits Enter, else None."""
+        if self._extrude_state is not None and self._extrude_state.get("typed"):
+            return "extrude"
+        if self._fillet_state is not None and self._fillet_state.get("typed"):
+            return "fillet"
+        return None
+
+    def _value_info(self):
+        """(kind, base point, direction, value mm, live) for the value box, or None."""
+        if self._extrude_state is not None and (self._dragged or self._extrude_state.get("typed")):
+            s = self._extrude_state
+            return "extrude", s["center"], s["normal"], self._extrude_dist, True
+        if self._fillet_state is not None and (self._dragged or self._fillet_state.get("typed")):
+            s = self._fillet_state
+            return "fillet", np.asarray(s["mids"][0], float), s["outward"], s["radius"], True
+        if self._value_post is not None:
+            p = self._value_post
+            return p["kind"], p["base"], p["dir"], p["value"], False
+        return None
+
+    def _sync_value_box(self):
+        info = self._value_info()
+        box = self.value_box
+        if info is None:
+            box.hide()
             return
-        c = np.asarray(st["mids"][0], float)
-        out = st["outward"]
-        tip = c + (radius * out if out is not None else np.zeros(3))
-        w, h = self.width(), self.height()
-        s = self.camera.project(tip.reshape(1, 3), w, h)[0]
-        x, y = float(s[0]), float(s[1])
-        self._fillet_label.setText(f"R {radius:.2f} mm")
-        self._fillet_label.move(int(x) + 10, max(int(y) - 12, 2))
-        self._fillet_label.show()
+        kind, base, direction, value, live = info
+        if live and abs(value) < 1e-4 and not box.typing:
+            box.hide()
+            return
+        tip = np.asarray(base, float)
+        if direction is not None:
+            tip = tip + value * np.asarray(direction, float)
+        s = self.camera.project(tip.reshape(1, 3), self.width(), self.height())[0]
+        if np.isnan(s[0]) or np.isnan(s[1]):
+            box.hide()
+            return
+        box.set_kind(kind)
+        box.show_value(value)
+        x = min(int(s[0]) + 12, max(self.width() - box.width() - 2, 0))
+        y = min(max(int(s[1]) - 12, 2), max(self.height() - box.height() - 2, 0))
+        box.move(x, y)
+        box.show()
+        box.raise_()
+
+    def keyPressEvent(self, e):
+        text = e.text()
+        if (self._value_info() is not None and text and text.isprintable() and not text.isspace()
+                and not e.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)):
+            if self._extrude_state is not None:
+                self._extrude_state["typed"] = True
+            elif self._fillet_state is not None:
+                self._fillet_state["typed"] = True
+            self.value_box.start_typing(text)
+            self.update()
+            return
+        super().keyPressEvent(e)
+
+    def _on_box_edited(self, mm: float):
+        kind = self._typed_live()
+        if kind == "extrude":
+            self._extrude_dist = mm
+        elif kind == "fillet" and mm > 1e-4:
+            st = self._fillet_state
+            st["radius"] = mm
+            self.fillet_preview.emit(mm, st["mids"])
+        self.update()
+
+    def _on_box_accepted(self, mm: float):
+        kind = self._typed_live()
+        if kind == "extrude":
+            self._extrude_dist = mm
+            self._finish_extrude()
+        elif kind == "fillet":
+            self._fillet_state["radius"] = mm
+            self._finish_fillet()
+        elif self._value_post is not None:
+            self._value_post["value"] = mm
+            self.value_edit.emit(self._value_post["kind"], mm)
+        self.value_box.end_typing()
+        self.setFocus()
+        self.update()
+
+    def _on_box_cancelled(self):
+        if self._extrude_state is not None:
+            self._extrude_state = None
+            self._extrude_dist = 0.0
+        if self._fillet_state is not None:
+            self._fillet_state = None
+            self.fillet_cancel.emit()
+        self.dismiss_value_box()
+        self.setFocus()
+
+    def dismiss_value_box(self):
+        """Hide the value box left on the model after a drag."""
+        self._value_post = None
+        self.value_box.end_typing()
+        self.value_box.hide()
+        self.update()
+
+    def set_post_value(self, mm: float):
+        """Show a different value in the post-drag box (e.g. after the app reverted an edit)."""
+        if self._value_post is not None:
+            self._value_post["value"] = mm
+            self.value_box.end_typing()
+            self.update()
+
+    def _finish_extrude(self):
+        c, n = self._extrude_state["center"], self._extrude_state["normal"]
+        d = self._extrude_dist
+        self._extrude_state = None
+        self._extrude_dist = 0.0
+        # Set before emitting so the app can dismiss the box if the commit fails.
+        self._value_post = {"kind": "extrude", "base": c, "dir": n, "value": d} if abs(d) >= 0.01 else None
+        self.extrude_commit.emit(d, tuple(map(float, c)), tuple(map(float, n)))
+
+    def _finish_fillet(self):
+        st = self._fillet_state
+        self._fillet_state = None
+        r = st["radius"]
+        if r > 1e-4:  # (a 0 radius leaves any extrude box from the same press alone)
+            self._value_post = {"kind": "fillet", "base": np.asarray(st["mids"][0], float),
+                                "dir": st["outward"], "value": r}
+        self.fillet_commit.emit(r, st["mids"])  # 0 rolls back a live preview
 
     def mouseReleaseEvent(self, e):
         if self._press is not None and not self._dragged:
@@ -695,21 +814,18 @@ class Viewport(QOpenGLWidget):
                     self._snap_view(face)
             else:
                 self.clicked.emit(p.x(), p.y(), self._press[1], self._press[2])
-        # Commit drag-to-extrude
-        if self._extrude_state is not None and self._dragged:
-            c, n = self._extrude_state["center"], self._extrude_state["normal"]
-            self.extrude_commit.emit(self._extrude_dist,
-                                    tuple(map(float, c)), tuple(map(float, n)))
-            self._extrude_state = None
-            self._extrude_dist = 0.0
+        # Commit drag-to-extrude / drag-to-fillet, unless a typed value awaits Enter
+        if self._extrude_state is not None and not self._extrude_state.get("typed"):
+            if self._dragged:
+                self._finish_extrude()
+            else:
+                self._extrude_state = None
             self.update()
-        # Commit drag-to-fillet
-        if self._fillet_state is not None:
-            st = self._fillet_state
-            if self._dragged and st["radius"] > 1e-4:
-                self.fillet_commit.emit(st["radius"], st["mids"])
-            self._fillet_state = None
-            self._fillet_label.hide()
+        if self._fillet_state is not None and not self._fillet_state.get("typed"):
+            if self._dragged:
+                self._finish_fillet()
+            else:
+                self._fillet_state = None
             self.update()
         # Commit sketch drag
         if (self._press is not None and self._dragged and self._press[1] == Qt.LeftButton
@@ -722,6 +838,7 @@ class Viewport(QOpenGLWidget):
     def paintEvent(self, e):
         super().paintEvent(e)
         self._sync_dim_labels()
+        self._sync_value_box()
 
     def _sync_dim_labels(self):
         if self.sketch is None:

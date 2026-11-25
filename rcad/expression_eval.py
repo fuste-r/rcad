@@ -3,6 +3,7 @@ def _evaluate_expression(expression: str, variables: dict[str, float] | None = N
     Names resolve to `variables`; numbers/operators/functions use Python semantics."""
     import ast
     import operator as _op
+    variables = variables or {}
     _bin = {
         ast.Add: _op.add, ast.Sub: _op.sub, ast.Mult: _op.mul,
         ast.Div: _op.truediv, ast.FloorDiv: _op.floordiv,

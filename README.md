@@ -43,6 +43,8 @@ On Wayland with NVIDIA, if the OpenGL context fails to create, try `QT_QPA_PLATF
 | Standard view (Top, Bottom, Front, Back, Left, Right) | click a face of the cube in the top-right corner; drag the cube to orbit |
 | Multi-select | Ctrl + click |
 | Cancel / clear selection | Esc |
+| Exact size while dragging a face or edge | type a value (units, maths and variables work: `2in + 5mm`, `wall * 2`), then Enter or click; Esc cancels |
+| Change the size just made | click the value box left on the model, type, Enter |
 
 Workflow: choose a plane (or select a face and choose "Selected face"), **New Sketch**, draw, add constraints, **Finish Sketch**, then choose **Extrude**, **Revolve**, **Sweep**, or **Loft**. Revolve uses the sketch U or V axis; sweep uses a connected line sketch as its path; loft uses two or more ordered sketch sections. Select a face for **Push/Pull**, or edges for **Fillet**/**Chamfer**. Double-click a feature to edit it.
 
