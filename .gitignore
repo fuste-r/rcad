@@ -32,3 +32,5 @@ Thumbs.db
 # Local working files
 model.rcad
 errors.txt
+scratch_*.py
+tmp_*.rcad
