@@ -16,13 +16,12 @@ from rcad.units import INCH, MM
 
 
 
-def type_number(monkeypatch, text):
-    """Answer the next number dialogs by typing text (None: accept the shown value)."""
-    def exec_(self):
-        if text is not None:
-            self.field.setText(text)
-        return True
-    monkeypatch.setattr(appmod.NumberDialog, "exec", exec_)
+def answer(w, text, keep=True):
+    """Type text into the settings bar's single value, then press ✓ (keep=False: ✕)."""
+    bar = w.tool_bar
+    assert bar.active
+    bar.fields["value"].setText(text)
+    (bar.finish if keep else bar.cancel)()
 
 @pytest.fixture(scope="module")
 def qapp():
@@ -72,14 +71,7 @@ def test_ui_inches(qapp, monkeypatch, tmp_path):
     assert w.view.unit_mm == pytest.approx(25.4)
     assert w.snap.text() == "0.05 in" and w.snap.value() == pytest.approx(0.05 * 25.4)
 
-    # lengths typed in inches are stored as millimetres
-    type_number(monkeypatch, "2.0")
-    assert w.ask_length("t", "l", 10.0) == (pytest.approx(50.8), True)
-
-    # an untouched value keeps its exact millimetre value
-    type_number(monkeypatch, None)
-    assert w.ask_length("t", "l", 10.0)[0] == 10.0
-
+    # lengths typed in inches are stored as millimetres; an untouched value keeps its exact mm
     from rcad.tool_bar import ScrubField
     d = ScrubField(10.0, "length", INCH)
     assert d.value() == 10.0
@@ -91,8 +83,8 @@ def test_ui_inches(qapp, monkeypatch, tmp_path):
     w.new_sketch()
     w.sketch.add_rect(0, 0, 30, 20)
     w.view.sketch_sel = {("l", 0)}
-    type_number(monkeypatch, "2.0")
     w.add_constraint("distance")
+    answer(w, "2.0")
     c = w.sketch.constraints[-1]
     assert c.value == pytest.approx(50.8)
     assert "2 in" in w.constraints.item(w.constraints.count() - 1).text()

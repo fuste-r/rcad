@@ -14,13 +14,12 @@ from rcad.sketch import Constraint, Sketch, SketchPlane, standard_plane
 
 
 
-def type_number(monkeypatch, text):
-    """Answer the next number dialogs by typing text (None: accept the shown value)."""
-    def exec_(self):
-        if text is not None:
-            self.field.setText(text)
-        return True
-    monkeypatch.setattr(appmod.NumberDialog, "exec", exec_)
+def answer(w, text, keep=True):
+    """Type text into the settings bar's single value, then press ✓ (keep=False: ✕)."""
+    bar = w.tool_bar
+    assert bar.active
+    bar.fields["value"].setText(text)
+    (bar.finish if keep else bar.cancel)()
 
 @pytest.fixture(scope="module")
 def qapp():
@@ -56,18 +55,24 @@ def test_full_workflow(qapp, monkeypatch, tmp_path):
     w.set_tool("select")
     click(w, (20, 0, 0))  # bottom edge
     assert w.view.sketch_sel == {("l", 0)}
-    type_number(monkeypatch, "50.0")
     w.add_constraint("distance")
+    answer(w, "50.0")
     assert sk.constraints[-1].kind == "distance"
     xs = sorted({round(p[0], 4) for p in sk.points})
     assert xs[1] - xs[0] == pytest.approx(50.0)
 
-    # a conflicting dimension is rejected and rolled back
+    # a conflicting dimension can't be kept; cancelling rolls it back
     n = len(sk.constraints)
-    type_number(monkeypatch, "60.0")
     w.view.sketch_sel = {("l", 0)}
     w.add_constraint("distance")
+    w.tool_bar.fields["value"].setText("60.0")
+    assert w.tool_bar.error_label.text() and not w.tool_bar.tick.isEnabled()
+    w.tool_bar.finish()
+    assert w.tool_bar.active  # refused
+    w.tool_bar.cancel()
     assert len(sk.constraints) == n
+    xs = sorted({round(p[0], 4) for p in sk.points})
+    assert xs[1] - xs[0] == pytest.approx(50.0)
 
     # a circle with a diameter
     w.set_tool("circle")
@@ -76,8 +81,8 @@ def test_full_workflow(qapp, monkeypatch, tmp_path):
     assert len(sk.circles) == 1
     w.set_tool("select")
     w.view.sketch_sel = {("c", 0)}
-    type_number(monkeypatch, "8.0")
     w.add_constraint("diameter")
+    answer(w, "8.0")
     assert sk.circles[0][1] == pytest.approx(4.0)
 
     w.finish_sketch()
@@ -94,8 +99,8 @@ def test_full_workflow(qapp, monkeypatch, tmp_path):
     top = [i for i, f in enumerate(w.doc.mesh.faces) if f.normal is not None and f.normal[2] > 0.99]
     assert top
     w.view.sel_faces = {top[0]}
-    type_number(monkeypatch, "5.0")
     w.pushpull()
+    answer(w, "5.0")
     assert not w.doc.errors
     assert w.doc.part.volume == pytest.approx(vol + (50 * 30 - np.pi * 16) * 5, rel=1e-3)
 
@@ -103,8 +108,8 @@ def test_full_workflow(qapp, monkeypatch, tmp_path):
     edge = max(range(len(w.doc.mesh.edges)), key=lambda i: w.doc.mesh.edges[i].mid[2] + w.doc.mesh.edges[i].mid[0])
     w.view.sel_edges = {edge}
     before = w.doc.part.volume
-    type_number(monkeypatch, "1.0")
     w.fillet()
+    answer(w, "1.0")
     assert not w.doc.errors and w.doc.part.volume < before
 
     # picking in model mode selects faces

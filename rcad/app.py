@@ -27,7 +27,7 @@ from .sketch import (
 from .units import MM, UNITS
 from .theme import CHOICES, apply_choice
 from .tool_bar import Choice, Number, ToolSettingsBar
-from .value_box import FieldSet, NumberField, bind_ok
+from .value_box import FieldSet, NumberField
 from .viewport import Viewport
 
 FILE_FILTER = "rCad project (*.rcad)"
@@ -95,24 +95,6 @@ class LoftDialog(QDialog):
     @property
     def cut(self) -> bool:
         return self.mode.currentIndex() == 1
-
-
-class NumberDialog(QDialog):
-    """One labelled NumberField with OK/Cancel (replaces QInputDialog.getDouble)."""
-
-    def __init__(self, parent, title: str, label: str, field: NumberField):
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.field = field
-        form = QFormLayout(self)
-        form.addRow(label, field)
-        box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        box.accepted.connect(self.accept)
-        box.rejected.connect(self.reject)
-        bind_ok(box, [field])
-        form.addRow(box)
-        field.selectAll()
-        field.setFocus()
 
 
 class ExpressionDialog(QDialog):
@@ -420,15 +402,6 @@ class MainWindow(QMainWindow):
             QSettings("rcad", "rcad").setValue("theme", name)
         self.view.update()
 
-    def ask_length(self, title, label, mm_value, lo_mm=1e-6, hi_mm=1e6):
-        """Prompt for a length in the current units; returns (value in mm, accepted)."""
-        dlg = NumberDialog(self, title, label,
-                           NumberField(mm_value, "length", self.unit, self.doc.variables, lo_mm, hi_mm))
-        if not dlg.exec():
-            return mm_value, False
-        v = dlg.field.value()  # untouched text gives mm_value exactly
-        return (v, True) if v is not None else (mm_value, False)
-
     # ---- variables / expressions
     def _edit_variables(self):
         dialog = VariablesDialog(self, self.doc.variables)
@@ -528,6 +501,7 @@ class MainWindow(QMainWindow):
         self._redo.clear()
 
     def _push_sketch_undo(self):
+        self._settle_session()
         if self._sketch_restoring or self.mode != "sketch":
             return
         self._sketch_undo.setdefault(self.sketch_index, []).append(self.sketch.to_dict())
@@ -551,6 +525,7 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def undo_sketch(self):
+        self._settle_session()
         self.fields.stop()  # the shape the boxes were on may be gone
         history = self._sketch_undo.get(self.sketch_index, [])
         if not history:
@@ -562,6 +537,7 @@ class MainWindow(QMainWindow):
         return True
 
     def redo_sketch(self):
+        self._settle_session()
         self.fields.stop()
         history = self._sketch_redo.get(self.sketch_index, [])
         if not history:
@@ -1263,10 +1239,8 @@ class MainWindow(QMainWindow):
                 ax, ay = a
                 (x1, y1), (x2, y2) = b, c
                 cur = abs((x2 - x1) * (y1 - ay) - (x1 - ax) * (y2 - y1)) / max(math.hypot(x2 - x1, y2 - y1), 1e-12)
-                value, ok = self.ask_length("Spacing", "Spacing between lines", cur)
-                if not ok:
-                    return
-                new = [Constraint("spacing", [sk.lines[lines[0]][0], lines[1]], value)]
+                return self._constraint_session(
+                    "Spacing", Constraint("spacing", [sk.lines[lines[0]][0], lines[1]], cur), new=True)
             elif kind == "expression" and len(pts) == 2 and not lines and not circles:
                 dialog = ExpressionDialog(self, "(e.g. 2*a + 3)π")
                 if not dialog.exec():
@@ -1280,16 +1254,10 @@ class MainWindow(QMainWindow):
                 ends = pts if len(pts) == 2 and not lines else list(sk.lines[lines[0]]) if len(lines) == 1 and not pts else None
                 if ends:
                     cur = math.dist(sk.points[ends[0]], sk.points[ends[1]])
-                    value, ok = self.ask_length("Distance", "Distance", cur)
-                    if not ok:
-                        return
-                    new = [Constraint(kind, ends, value)]
+                    return self._constraint_session("Distance", Constraint(kind, ends, cur), new=True)
             elif kind == "diameter" and len(circles) == 1 and not pts and not lines:
                 cur = 2 * sk.circles[circles[0]][1]
-                value, ok = self.ask_length("Diameter", "Diameter", cur)
-                if not ok:
-                    return
-                new = [Constraint(kind, circles, value)]
+                return self._constraint_session("Diameter", Constraint(kind, circles, cur), new=True)
             elif kind == "fixed" and pts and not lines and not circles:
                 new = [Constraint(kind, [p]) for p in pts]
             elif kind == "point_on_line" and len(pts) == 1 and len(lines) == 1 and not circles:
@@ -1395,7 +1363,8 @@ class MainWindow(QMainWindow):
 
     def edit_constraint(self, item):
         i = self.constraints.row(item)
-        c = self.sketch.constraints[i]
+        sk = self.sketch
+        c = sk.constraints[i]
         if c.expression is not None:
             dialog = ExpressionDialog(self, c.expression)
             if dialog.exec():
@@ -1413,21 +1382,14 @@ class MainWindow(QMainWindow):
         if c.value is None:
             return
         self._push_sketch_undo()
-        v, ok = self.ask_length("Dimension", "Value", c.value)
-        if ok:
-            old, c.value = c.value, v
-            sk.version += 1
-            if not self._solve_sketch():
-                c.value = old
-                self.sketch.solve()
-                self.refresh_constraints()
+        self._constraint_session(f"Edit {c.kind}", c, new=False)
 
     def delete_constraint(self):
         i = self.constraints.currentRow()
         if i >= 0:
             self._push_sketch_undo()
             self.sketch.remove_constraint(i)
-            sk.version += 1
+            self.sketch.version += 1
             self._solve_sketch()
 
     def delete_selection(self):
@@ -1597,7 +1559,24 @@ class MainWindow(QMainWindow):
 
         self._begin_session(title, items, f, new, apply)
 
-    def _begin_session(self, title, items, f: Feature, new: bool, apply, done=None):
+    def _value_session(self, f: Feature, title: str, label: str, new: bool, lo: float, hi: float,
+                       nonzero: bool = False):
+        """One length on a feature (push/pull distance, fillet radius, chamfer size)."""
+        items = [Number("value", label, f.value, lo=lo, hi=hi)]
+
+        def apply(f, v):
+            f.value = v["value"]
+
+        def validate(v):
+            return f"{label} can't be 0" if nonzero and abs(v["value"]) < 1e-9 else None
+
+        def done(f):
+            if f.kind == "fillet":
+                f.result_edges = self._fillet_result_edges(f)
+
+        self._begin_session(title, items, f, new, apply, done, validate)
+
+    def _begin_session(self, title, items, f: Feature, new: bool, apply, done=None, validate=None):
         """Open the settings bar on a feature: new ones are added to the history right away and
         every change rebuilds the model; ✓ keeps it, ✕ puts the history back. One undo step."""
         self._settle_session()
@@ -1605,60 +1584,106 @@ class MainWindow(QMainWindow):
         snapshot = {k: getattr(f, k) for k in ("value", "cut", "auto", "axis")}
         if new:
             self.doc.features.append(f)
-        self._session = {"feature": f, "new": new, "snapshot": snapshot, "apply": apply, "done": done}
+
+        def index():
+            return next((i for i, x in enumerate(self.doc.features) if x is f), None)
+
+        def preview(values):
+            if validate is not None:
+                err = validate(values)
+                if err:
+                    return err
+            apply(f, values)
+            f.version += 1
+            self.rebuild()
+            i = index()
+            return "The feature is gone" if i is None else self.doc.errors.get(i)
+
+        def check():
+            i = index()
+            return "The feature is gone" if i is None else self.doc.errors.get(i)
+
+        def restore():
+            if new:
+                self.doc.features[:] = [x for x in self.doc.features if x is not f]
+            else:
+                for k, v in snapshot.items():
+                    setattr(f, k, v)
+                f.version += 1
+            if self._undo:
+                self._undo.pop()  # the snapshot taken when the tool opened
+            self.rebuild()
+
+        self._open_session(title, items, preview, check, restore, (lambda: done(f)) if done else None)
+
+    def _constraint_session(self, title: str, c: Constraint, new: bool):
+        """A sketch dimension in the bar: the sketch re-solves as the value changes.
+        The caller has pushed the sketch undo snapshot; new constraints are added here."""
+        sk, index = self.sketch, self.sketch_index
+        snapshot = sk.to_dict()
+        if new:
+            sk.constraints.append(c)
+
+        def preview(values):
+            c.value = values["value"]
+            sk.version += 1
+            return None if self._solve_sketch() else f"Can't solve the sketch ({sk.status})"
+
+        def restore():
+            self._sketch_restoring = True
+            try:
+                self._restore_sketch(snapshot, index)
+            finally:
+                self._sketch_restoring = False
+            stack = self._sketch_undo.get(index)
+            if stack:
+                stack.pop()  # the snapshot taken when the dimension was started
+            sk.version += 1
+            self._solve_sketch()
+
+        items = [Number("value", "Value", c.value, lo=1e-6, hi=1e6)]
+        self._open_session(title, items, preview, lambda: None, restore)
+
+    def _open_session(self, title, items, preview, check, restore, done=None):
+        """preview(values) -> error or None; check() -> error or None; restore() undoes everything."""
+        self._session = {"preview": preview, "check": check, "restore": restore, "done": done, "error": None}
         self.tool_bar.begin(title, items, self._session_changed, self._finish_session, self._cancel_session)
         self._session_changed(self.tool_bar.values())
-
-    def _session_index(self) -> int | None:
-        f = self._session["feature"]
-        return next((i for i, x in enumerate(self.doc.features) if x is f), None)
 
     def _session_changed(self, values: dict | None):
         s = self._session
         if s is None or values is None:
             return
-        f = s["feature"]
-        s["apply"](f, values)
-        f.version += 1
-        self.rebuild()
-        self.tool_bar.set_error(self.doc.errors.get(self._session_index()))
+        s["error"] = s["preview"](values)
+        self.tool_bar.set_error(s["error"])
 
     def _finish_session(self) -> bool:
-        """✓ / Enter: keep the feature as previewed. Returns False (bar stays open) if it fails."""
+        """✓ / Enter: keep the result as previewed. Returns False (bar stays open) if it fails."""
         s = self._session
         if s is None:
             return True
-        i = self._session_index()
-        if i is None or i in self.doc.errors:
-            self.tool_bar.set_error(self.doc.errors.get(i, "The feature is gone"))
+        err = s["error"] or s["check"]()
+        if err:
+            self.tool_bar.set_error(err)
             return False
         self._session = None
         self.tool_bar.end()
         if s["done"]:
-            s["done"](s["feature"])
+            s["done"]()
         self.view.setFocus()
         return True
 
     def _cancel_session(self):
-        """✕ / Esc: put the history back as it was before the tool opened."""
+        """✕ / Esc: put everything back as it was before the tool opened."""
         s, self._session = self._session, None
         self.tool_bar.end()
         if s is None:
             return
-        f = s["feature"]
-        if s["new"]:
-            self.doc.features[:] = [x for x in self.doc.features if x is not f]
-        else:
-            for k, v in s["snapshot"].items():
-                setattr(f, k, v)
-            f.version += 1
-        if self._undo:
-            self._undo.pop()  # the snapshot taken when the tool opened
-        self.rebuild()
+        s["restore"]()
         self.view.setFocus()
 
     def _settle_session(self):
-        """Something else is starting: keep the open tool's feature, or drop it if it fails."""
+        """Something else is starting: keep the open tool's result, or drop it if it fails."""
         if self._session is not None and not self._finish_session():
             self._cancel_session()
 
@@ -1718,10 +1743,8 @@ class MainWindow(QMainWindow):
         if info.normal is None:
             QMessageBox.information(self, "↕️", "Only planar faces are supported.")
             return
-        v, ok = self.ask_length("↕️", "Distance, positive = outward", 5.0, -1e5, 1e5)
-        if ok and v != 0:
-            self.commit(Feature("pushpull", value=v, face=(tuple(map(float, info.center)),
-                                                           tuple(map(float, info.normal)))))
+        f = Feature("pushpull", value=5.0, face=(tuple(map(float, info.center)), tuple(map(float, info.normal))))
+        self._value_session(f, "Push/pull", "Distance (+ out)", new=True, lo=-1e5, hi=1e5, nonzero=True)
 
     def on_extrude_commit(self, dist: float, center: tuple, normal: tuple):
         """Drag-to-extrude: commit a pushpull feature from the drag distance."""
@@ -2048,11 +2071,10 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, kind.title(), "Select one or more edges first (Ctrl+click for several).")
             return
         mids = [tuple(map(float, self.doc.mesh.edges[i].mid)) for i in sorted(self.view.sel_edges)]
-        v, ok = self.ask_length(kind.title(), "Size", 1.0, 1e-4, 1e4)
-        if ok:
-            dirs = self._fillet_edge_dirs(mids) if kind == "fillet" else []
-            refs = self._fillet_edge_refs(mids) if kind == "fillet" else []
-            self.commit(Feature(kind, value=v, edges=mids, edge_dirs=dirs, edge_refs=refs))
+        dirs = self._fillet_edge_dirs(mids) if kind == "fillet" else []
+        refs = self._fillet_edge_refs(mids) if kind == "fillet" else []
+        f = Feature(kind, value=1.0, edges=mids, edge_dirs=dirs, edge_refs=refs)
+        self._value_session(f, kind.title(), "Radius" if kind == "fillet" else "Size", new=True, lo=1e-4, hi=1e4)
 
     def fillet(self):
         self._edge_feature("fillet")
@@ -2071,6 +2093,13 @@ class MainWindow(QMainWindow):
             return
         if f.kind == "revolve":
             self._revolve_session(f, "Edit revolve", new=False)
+            return
+        if f.kind == "pushpull":
+            self._value_session(f, "Edit push/pull", "Distance (+ out)", new=False, lo=-1e5, hi=1e5, nonzero=True)
+            return
+        if f.kind in ("fillet", "chamfer"):
+            self._value_session(f, f"Edit {f.kind}", "Radius" if f.kind == "fillet" else "Size",
+                                new=False, lo=1e-4, hi=1e4)
             return
         self._push_undo()
         if f.kind == "sweep":
@@ -2108,21 +2137,6 @@ class MainWindow(QMainWindow):
                 f.section_refs, f.cut = old
                 f.version += 1
                 self.rebuild()
-            return
-        else:
-            v, ok = self.ask_length(f.kind.title(), "Value", f.value, -1e5, 1e5)
-            if not ok or v == 0:
-                return
-            new = (v, f.cut, f.auto)
-        old = (f.value, f.cut, f.auto)
-        f.value, f.cut, f.auto = new
-        f.version += 1
-        self.rebuild()
-        if i in self.doc.errors:
-            QMessageBox.warning(self, "Operation failed", self.doc.errors[i])
-            f.value, f.cut, f.auto = old
-            f.version += 1
-            self.rebuild()
 
     def toggle_layer(self, item):
         i = self.features.row(item)

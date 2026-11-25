@@ -495,17 +495,15 @@ def test_number_field_range_and_ok_button(qapp):
     assert f.value() == pytest.approx(90.0) and ok.isEnabled()
 
 
-def test_ask_length_accepts_expressions(qapp, monkeypatch):
-    w = MainWindow()
+def test_bar_value_accepts_expressions(qapp, monkeypatch):
+    w = _box_model(monkeypatch)
     w.doc.variables = {"wall": 2.0}
-
-    def exec_(self):
-        self.field.setText("wall * 3 + 1cm")
-        return True
-    monkeypatch.setattr(appmod.NumberDialog, "exec", exec_)
-    assert w.ask_length("t", "l", 5.0) == (pytest.approx(16.0), True)
-    monkeypatch.setattr(appmod.NumberDialog, "exec", lambda self: False)
-    assert w.ask_length("t", "l", 5.0) == (5.0, False)
+    top = next(i for i, f in enumerate(w.doc.mesh.faces) if f.normal is not None and f.normal[2] > 0.9)
+    w.view.sel_faces = {top}
+    w.pushpull()
+    w.tool_bar.fields["value"].setText("wall * 3 + 1cm")
+    w.tool_bar.finish()
+    assert w.doc.features[-1].kind == "pushpull" and w.doc.features[-1].value == pytest.approx(16.0)
 
 
 def test_variables_dialog_values_take_expressions(qapp):
