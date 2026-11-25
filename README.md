@@ -54,7 +54,7 @@ Every modelling tool is in the line along the bottom of the view: **Sketch**, **
 
 ## Limitations
 
-Faces and edges are re-found by geometry, not topological IDs, so an upstream change can leave a later feature unable to find its target. Push/pull supports planar faces only.
+Push/pull faces and fillet/chamfer edges are found again after upstream edits by a geometric signature (type, position, size, direction, neighbouring faces), so they follow a face or edge that grows or moves along its normal, such as a height or width change. When the reference can't be found, or two faces or edges match equally well, the feature fails with a message in the feature list instead of using a different face or edge; one that moved sideways to a new place has to be redone. A sketch on a face keeps its plane where it was drawn. Push/pull supports planar faces only.
 
 ## Tests
 

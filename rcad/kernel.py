@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from build123d import Axis, Edge, GeomType, Shape, Solid, Vector, Wire, export_step, export_stl, loft
 
+from . import refs
 from .sketch import Sketch
 from .units import MM, UNITS, Unit
 
@@ -35,6 +36,7 @@ class Feature:
     axis: str = "v"  # revolve: sketch-local axis, "u" or "v"
     path_ref: int = -1  # sweep: sketch feature containing the path
     section_refs: list = field(default_factory=list)  # loft: ordered sketch section feature indices
+    ref_sigs: list = field(default_factory=list, repr=False)  # pushpull: [face signature]; fillet/chamfer: one per edge
 
     def label(self, unit: Unit = MM) -> str:
         if self.kind == "sketch":
@@ -64,7 +66,8 @@ class Feature:
              "path_ref": self.path_ref, "section_refs": self.section_refs,
              "edge_dirs": [list(d) if d is not None else None for d in self.edge_dirs],
              "edge_refs": [[list(point) for point in path] if path is not None else None
-                           for path in self.edge_refs]}
+                           for path in self.edge_refs],
+             "ref_sigs": self.ref_sigs}
         if self.sketch:
             d["sketch"] = self.sketch.to_dict()
         return d
@@ -82,7 +85,8 @@ class Feature:
                                   for direction in d.get("edge_dirs", [])],
                        edge_refs=[[tuple(point) for point in path] if path is not None else None
                                   for path in d.get("edge_refs", [])], axis=d.get("axis", "v"),
-                       path_ref=d.get("path_ref", -1), section_refs=list(d.get("section_refs", [])))
+                       path_ref=d.get("path_ref", -1), section_refs=list(d.get("section_refs", [])),
+                       ref_sigs=list(d.get("ref_sigs", [])))
 
 
 @dataclass
@@ -173,21 +177,6 @@ def build_mesh(shape: Shape, tol: float = 0.05) -> MeshData:
         edge_shapes.append(e)
     return MeshData(np.array(verts, np.float32).reshape(-1, 3), np.array(tris, np.uint32).reshape(-1, 3),
                     np.array(owner, np.int32), faces, edges, shape, edge_shapes)
-
-
-def _find_planar_face(part: Shape, center, normal):
-    c, n = np.asarray(center, float), np.asarray(normal, float)
-    best, best_d = None, 1e9
-    for f in part.faces():
-        if f.geom_type != GeomType.PLANE:
-            continue
-        fn, fc = _vec(f.normal_at()), _vec(f.center())
-        if np.dot(fn, n) < 0.999 or abs(np.dot(fc - c, n)) > 1e-4:
-            continue
-        d = np.linalg.norm(fc - c)
-        if d < best_d:
-            best, best_d = f, d
-    return best
 
 
 def _mostly_inside(part: Shape, solid: Shape) -> bool:
@@ -356,18 +345,36 @@ class Document:
         if f.kind == "pushpull":
             if part is None:
                 raise ValueError("nothing to push/pull")
-            face = _find_planar_face(part, *f.face)
-            if face is None:
-                raise ValueError("face no longer exists")
+            topo = refs.Topology(part)
+            sig = f.ref_sigs[0] if f.ref_sigs else {"kind": "face", "center": list(f.face[0]),
+                                                     "normal": list(f.face[1])}
+            face = refs.resolve_face(topo, sig, "its face")
+            # follow the face: store where it is now
+            f.ref_sigs = [refs.face_signature(topo, face)]
+            f.face = (tuple(map(float, _vec(face.center()))), tuple(map(float, f.face[1])))
             n = np.asarray(f.face[1], float) * f.value
             solid = Solid.extrude(face, Vector(float(n[0]), float(n[1]), float(n[2])))
             return self._combine(part, solid, f.value < 0)
         if f.kind in ("fillet", "chamfer"):
             if part is None:
                 raise ValueError("nothing to modify")
-            edges = [_find_edge(part, m) for m in f.edges]
-            if not edges or any(e is None for e in edges):
-                raise ValueError("edge no longer exists")
+            if not f.edges:
+                raise ValueError("no edges picked")
+            topo = refs.Topology(part)
+            edges = []
+            for k, m in enumerate(f.edges):
+                sig = f.ref_sigs[k] if k < len(f.ref_sigs) else {"kind": "edge", "mid": list(m)}
+                what = "its edge" if len(f.edges) == 1 else f"edge {k + 1} of {len(f.edges)}"
+                e = refs.resolve_edge(topo, sig, what)
+                if any(e.wrapped.IsSame(x.wrapped) for x in edges):
+                    raise refs.RefError(f"{what} now matches the same edge as another picked edge")
+                edges.append(e)
+            # follow the edges: store where they are now
+            f.ref_sigs = [refs.edge_signature(topo, e) for e in edges]
+            f.edges = [tuple(sig["mid"]) for sig in f.ref_sigs]
+            f.edge_refs = [refs.edge_path(e) for e in edges]
+            if f.kind == "fillet":
+                f.edge_dirs = [None if sig["dir"] is None else tuple(sig["dir"]) for sig in f.ref_sigs]
             corners = [e for e in edges if not _is_seam(part, e)]
             if not corners:
                 raise ValueError("picked edge is a seam (same surface on both sides) — cannot be rounded")
