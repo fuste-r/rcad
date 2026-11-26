@@ -5,14 +5,14 @@ import json
 from dataclasses import dataclass, field
 
 import numpy as np
-from build123d import Axis, Edge, GeomType, Shape, Solid, Vector, Wire, export_step, export_stl, loft
+from build123d import Axis, Edge, GeomType, Plane, Shape, Solid, Vector, Wire, export_step, export_stl, loft
 
 from . import refs
 from .sketch import Sketch
 from .units import MM, UNITS, Unit
 
 FORMAT_VERSION = 1
-KINDS = ("sketch", "extrude", "revolve", "sweep", "loft", "pushpull", "fillet", "chamfer")
+KINDS = ("sketch", "extrude", "revolve", "sweep", "loft", "pushpull", "fillet", "chamfer", "move", "mirror")
 
 
 @dataclass
@@ -37,6 +37,12 @@ class Feature:
     path_ref: int = -1  # sweep: sketch feature containing the path
     section_refs: list = field(default_factory=list)  # loft: ordered sketch section feature indices
     ref_sigs: list = field(default_factory=list, repr=False)  # pushpull: [face signature]; fillet/chamfer: one per edge
+    # move/mirror: ref_sigs holds one body signature per body moved
+    offset: tuple = (0.0, 0.0, 0.0)  # move: translation in mm
+    angle: float = 0.0  # move: rotation in degrees about rot_axis through the body's centre
+    rot_axis: str = "z"  # move: "x" | "y" | "z"
+    plane: str = "YZ"  # mirror: "YZ" | "XZ" | "XY"; `value` is the plane's offset along its normal
+    copy: bool = False  # move/mirror: keep the original body too
 
     def label(self, unit: Unit = MM) -> str:
         if self.kind == "sketch":
@@ -56,6 +62,14 @@ class Feature:
             return f"{'Cut' if self.cut else 'Loft'} x{len(self.section_refs)} sections"
         if self.kind == "pushpull":
             return f"Push/Pull {'+' if self.value >= 0 else '-'}{unit.fmt(abs(self.value))}"
+        if self.kind == "move":
+            parts = [f"{'Copy' if self.copy else 'Move'} {', '.join(unit.fmt(v) for v in self.offset)}"]
+            if self.angle:
+                parts.append(f"{self.angle:g} deg about {self.rot_axis.upper()}")
+            return " ".join(parts) + f" x{len(self.ref_sigs)}"
+        if self.kind == "mirror":
+            keep = " (copy)" if self.copy else ""
+            return f"Mirror {self.plane} at {unit.fmt(self.value)}{keep} x{len(self.ref_sigs)}"
         return f"{self.kind.title()} {unit.fmt(self.value)} x{len(self.edges)}"
 
     def to_dict(self) -> dict:
@@ -67,7 +81,8 @@ class Feature:
              "edge_dirs": [list(d) if d is not None else None for d in self.edge_dirs],
              "edge_refs": [[list(point) for point in path] if path is not None else None
                            for path in self.edge_refs],
-             "ref_sigs": self.ref_sigs}
+             "ref_sigs": self.ref_sigs, "offset": list(self.offset), "angle": self.angle,
+             "rot_axis": self.rot_axis, "plane": self.plane, "copy": self.copy}
         if self.sketch:
             d["sketch"] = self.sketch.to_dict()
         return d
@@ -86,7 +101,9 @@ class Feature:
                        edge_refs=[[tuple(point) for point in path] if path is not None else None
                                   for path in d.get("edge_refs", [])], axis=d.get("axis", "v"),
                        path_ref=d.get("path_ref", -1), section_refs=list(d.get("section_refs", [])),
-                       ref_sigs=list(d.get("ref_sigs", [])))
+                       ref_sigs=list(d.get("ref_sigs", [])),
+                       offset=tuple(map(float, d.get("offset", (0.0, 0.0, 0.0)))), angle=d.get("angle", 0.0),
+                       rot_axis=d.get("rot_axis", "z"), plane=d.get("plane", "YZ"), copy=d.get("copy", False))
 
 
 @dataclass
@@ -418,7 +435,49 @@ class Document:
             # Multi-solid parts (e.g. a disconnected model) keep every modified
             # body; fuse into one Part rather than the old Solid(...) container.
             return modified[0] if len(modified) == 1 else modified[0].fuse(*modified[1:]).clean()
+        if f.kind in ("move", "mirror"):
+            return self._move_bodies(part, f)
         raise ValueError(f"unknown feature {f.kind}")
+
+    AXES = {"x": (1.0, 0.0, 0.0), "y": (0.0, 1.0, 0.0), "z": (0.0, 0.0, 1.0)}
+    PLANE_NORMALS = {"YZ": "x", "XZ": "y", "XY": "z"}
+
+    def _move_bodies(self, part: Shape | None, f: Feature) -> Shape:
+        """Move/rotate or mirror the picked bodies; with `copy` the originals stay too.
+        Bodies that end up touching or overlapping join into one."""
+        if part is None:
+            raise ValueError(f"nothing to {f.kind}")
+        if not f.ref_sigs:
+            raise ValueError("no body picked")
+        if f.kind == "move" and f.rot_axis not in self.AXES:
+            raise ValueError("rotation axis must be X, Y or Z")
+        if f.kind == "mirror" and f.plane not in self.PLANE_NORMALS:
+            raise ValueError("mirror plane must be YZ, XZ or XY")
+        solids = part.solids()
+        scale = max(float(part.bounding_box().diagonal), 1e-6)
+        picked: list[int] = []
+        for k, sig in enumerate(f.ref_sigs):
+            what = "its body" if len(f.ref_sigs) == 1 else f"body {k + 1} of {len(f.ref_sigs)}"
+            i = refs.resolve_body(solids, sig, scale, what)
+            if i in picked:
+                raise refs.RefError(f"{what} now matches the same body as another picked body")
+            picked.append(i)
+        f.ref_sigs = [refs.body_signature(solids[i]) for i in picked]  # follow the bodies
+        out = [s for j, s in enumerate(solids) if j not in picked]
+        for i in picked:
+            s = solids[i]
+            if f.kind == "move":
+                t = s
+                if abs(f.angle) > 1e-12:
+                    t = t.rotate(Axis(s.center(), self.AXES[f.rot_axis]), f.angle)
+                t = t.translate(Vector(*map(float, f.offset)))
+            else:
+                n = np.asarray(self.AXES[self.PLANE_NORMALS[f.plane]])
+                t = s.mirror(Plane(origin=tuple(n * f.value), z_dir=tuple(n)))
+            if f.copy:
+                out.append(s)
+            out.append(t)
+        return out[0] if len(out) == 1 else out[0].fuse(*out[1:]).clean()
 
     def _sketch_for_feature(self, index: int, role: str) -> Sketch:
         if not 0 <= index < len(self.features) or self.features[index].kind != "sketch":

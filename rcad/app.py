@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from . import refs
 from .kernel import Document, Feature
 from .camera import ray_plane
 from .sketch import (
@@ -345,6 +346,8 @@ class MainWindow(QMainWindow):
             act("↕️ Push/Pull", self.pushpull, "Move the selected planar face along its normal"),
             act("◐ Fillet", self.fillet, "Round the selected edges"),
             act("◺ Chamfer", self.chamfer, "Bevel the selected edges"),
+            act("✥ Move body", self.move_bodies, "Move or rotate the selected bodies (double-click selects one)"),
+            act("⇋ Mirror body", self.mirror_bodies, "Mirror the selected bodies across a plane"),
             None,
             act("🗑 Delete feature", self.delete_feature, "Delete the highlighted feature"),
         ])
@@ -976,6 +979,13 @@ class MainWindow(QMainWindow):
             delete = ("🗑", self.delete_selection, "Delete the selected sketch items")
             return ("sketch", tuple(sel)), anchor, tools[:2], tools[2:], delete
         mesh = self.doc.mesh
+        bodies = self._selected_bodies()
+        if bodies:
+            faces = sorted(set().union(*(self._body_faces(b) for b in bodies)))
+            anchor = np.max([mesh.faces[f].center for f in faces], axis=0)  # beside the body's far corner
+            tools = [("✥ Move", self.move_bodies, "Move or rotate the selected bodies (or a copy)"),
+                     ("⇋ Mirror", self.mirror_bodies, "Mirror the selected bodies across a plane")]
+            return ("bodies", tuple(bodies)), anchor, tools, [], None
         if v.sel_edges and not v.sel_faces and mesh is not None:
             edges = sorted(e for e in v.sel_edges if 0 <= e < len(mesh.edges))
             if not edges:
@@ -1618,6 +1628,17 @@ class MainWindow(QMainWindow):
         mesh = self.doc.mesh
         return {i for i, b in enumerate(mesh.face_body) if b == body}
 
+    def _selected_bodies(self) -> list[int] | None:
+        """The bodies whose every face is selected, when the selection is exactly those; else None."""
+        v, mesh = self.view, self.doc.mesh
+        if mesh is None or not v.sel_faces or v.sel_edges or self.mode != "model":
+            return None
+        faces = {f for f in v.sel_faces if 0 <= f < len(mesh.faces)}
+        bodies = sorted({mesh.face_body[f] for f in faces})
+        if not bodies or faces != set().union(*(self._body_faces(b) for b in bodies)):
+            return None
+        return bodies
+
     def on_double_click(self, x, y, mods):
         """Double-click: the whole body under the pointer, or in a sketch the connected chain of
         lines (or the circle). Drawing tools treat it as two clicks. Ctrl adds to the selection."""
@@ -1748,8 +1769,8 @@ class MainWindow(QMainWindow):
         parts = []
         if v.sel_faces and mesh is not None:
             faces = {f for f in v.sel_faces if 0 <= f < len(mesh.faces)}
-            bodies = sorted({mesh.face_body[f] for f in faces})
-            if not v.sel_edges and bodies and faces == set().union(*(self._body_faces(b) for b in bodies)):
+            bodies = self._selected_bodies()
+            if bodies:
                 return f"Body {bodies[0] + 1}" if len(bodies) == 1 else f"{len(bodies)} bodies"
             if len(faces) == 1:
                 parts.append("Flat face" if mesh.faces[next(iter(faces))].normal is not None else "Curved face")
@@ -1988,6 +2009,58 @@ class MainWindow(QMainWindow):
 
         self._begin_session(title, items, f, new, apply)
 
+    MOVE_COPY = [("move", "Move"), ("copy", "Copy")]
+    ROT_AXES = [("x", "X axis"), ("y", "Y axis"), ("z", "Z axis")]
+    MIRROR_PLANES = [("YZ", "YZ plane"), ("XZ", "XZ plane"), ("XY", "XY plane")]
+
+    def _body_feature(self, kind: str) -> Feature | None:
+        """A new move/mirror feature on the selected bodies, or None (with a hint) if none are."""
+        bodies = self._selected_bodies()
+        if not bodies:
+            QMessageBox.information(self, kind.title(), "Select a body first: double-click it (Ctrl adds more), "
+                                                        "or Ctrl+A for all of them.")
+            return None
+        solids = self.doc.part.solids()
+        sigs = [refs.body_signature(solids[b]) for b in bodies if b < len(solids)]
+        f = Feature(kind, ref_sigs=sigs, copy=kind == "mirror")
+        self._clear_model_selection()  # the faces renumber as the bodies move
+        self._update_regions()
+        return f
+
+    def move_bodies(self):
+        f = self._body_feature("move")
+        if f is not None:
+            self._move_session(f, "Move", new=True)
+
+    def mirror_bodies(self):
+        f = self._body_feature("mirror")
+        if f is not None:
+            self._mirror_session(f, "Mirror", new=True)
+
+    def _move_session(self, f: Feature, title: str, new: bool):
+        dx, dy, dz = f.offset
+        items = [Number("x", "X", dx, lo=-1e5, hi=1e5), Number("y", "Y", dy, lo=-1e5, hi=1e5),
+                 Number("z", "Z", dz, lo=-1e5, hi=1e5),
+                 Number("angle", "Rotate", f.angle, "angle", lo=-360.0, hi=360.0),
+                 Choice("rot_axis", "About", self.ROT_AXES, f.rot_axis),
+                 Choice("copy", "Keep", self.MOVE_COPY, "copy" if f.copy else "move")]
+
+        def apply(f, v):
+            f.offset = (v["x"], v["y"], v["z"])
+            f.angle, f.rot_axis, f.copy = v["angle"], v["rot_axis"], v["copy"] == "copy"
+
+        self._begin_session(title, items, f, new, apply)
+
+    def _mirror_session(self, f: Feature, title: str, new: bool):
+        items = [Choice("plane", "Plane", self.MIRROR_PLANES, f.plane),
+                 Number("offset", "At", f.value, lo=-1e5, hi=1e5),
+                 Choice("copy", "Keep", self.MOVE_COPY, "copy" if f.copy else "move")]
+
+        def apply(f, v):
+            f.plane, f.value, f.copy = v["plane"], v["offset"], v["copy"] == "copy"
+
+        self._begin_session(title, items, f, new, apply)
+
     def _value_session(self, f: Feature, title: str, label: str, new: bool, lo: float, hi: float,
                        nonzero: bool = False):
         """One length on a feature (push/pull distance, fillet radius, chamfer size)."""
@@ -2010,7 +2083,8 @@ class MainWindow(QMainWindow):
         every change rebuilds the model; ✓ keeps it, ✕ puts the history back. One undo step."""
         self._settle_session()
         self._push_undo()
-        snapshot = {k: getattr(f, k) for k in ("value", "cut", "auto", "axis")}
+        snapshot = {k: getattr(f, k) for k in ("value", "cut", "auto", "axis", "offset", "angle", "rot_axis",
+                                               "plane", "copy")}
         if new:
             self.doc.features.append(f)
 
@@ -2548,6 +2622,12 @@ class MainWindow(QMainWindow):
         if f.kind in ("fillet", "chamfer"):
             self._value_session(f, f"Edit {f.kind}", "Radius" if f.kind == "fillet" else "Size",
                                 new=False, lo=1e-4, hi=1e4)
+            return
+        if f.kind == "move":
+            self._move_session(f, "Edit move", new=False)
+            return
+        if f.kind == "mirror":
+            self._mirror_session(f, "Edit mirror", new=False)
             return
         self._push_undo()
         if f.kind == "sweep":

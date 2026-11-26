@@ -233,3 +233,32 @@ def resolve_edge(topo: Topology, sig: dict, what: str = "its edge"):
             s += 0.5 * _normals_mismatch(sig["faces"], [_normal_at(f, mid) for f in faces])
         scored.append((s, e))
     return _pick(scored, what)
+
+
+# -- bodies
+def body_signature(solid) -> dict:
+    bb = solid.bounding_box()
+    return {"kind": "body", "center": _vec(solid.center()).tolist(), "volume": float(solid.volume),
+            "min": _vec(bb.min).tolist(), "max": _vec(bb.max).tolist()}
+
+
+def resolve_body(solids: list, sig: dict, scale: float, what: str = "its body") -> int:
+    """Index in `solids` of the body `sig` refers to; raises RefError.
+
+    Exact when a body still has the same centre and volume. Otherwise a body counts only
+    if the old centre lies inside its bounding box (it grew, shrank or moved a little),
+    and the nearest one by centre and volume is taken if it is clearly the best."""
+    c0 = np.asarray(sig["center"], float)
+    tol = max(EXACT_TOL, 1e-5 * scale)
+    scored = []
+    for i, s in enumerate(solids):
+        c = _vec(s.center())
+        if float(np.linalg.norm(c - c0)) < EXACT_TOL and _ratio(float(s.volume), sig.get("volume")) < 1e-6:
+            return i
+        bb = s.bounding_box()
+        lo, hi = _vec(bb.min) - tol, _vec(bb.max) + tol
+        if not (np.all(c0 >= lo) and np.all(c0 <= hi)):
+            continue  # another body, not this one changed
+        scored.append((float(np.linalg.norm(c - c0)) / max(scale, 1e-6)
+                       + 0.5 * _ratio(float(s.volume), sig.get("volume")), i))
+    return _pick(scored, what)

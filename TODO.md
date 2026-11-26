@@ -25,7 +25,7 @@ Interaction ideas taken from superGeometry.app's README (Nov 2026). Several of t
 
 - [x] Type while dragging: every drag or draw shows a value box by the pointer that stays after release. Typing a number goes into it, Tab moves to the next size, Enter confirms, and dragging the box left or right scrubs the value. Every number field accepts units (`2in`, `5cm`), arithmetic (`40/3 + 2`), and variables (`wall * 2`).
 - [ ] Replace feature dialogs with a tool bar that becomes the active tool's settings: values you can tap and type or drag, option words to toggle, a tick to finish and a cross to cancel.
-- [ ] Quick buttons beside the current selection: its two likeliest next tools (flat face → Sketch, Push/Pull; edge → Fillet, Chamfer; body → Move, Mirror), then Delete and More. Show only the tools that apply to the selection.
+- [x] Quick buttons beside the current selection: its two likeliest next tools (flat face → Sketch, Push/Pull; edge → Fillet, Chamfer; body → Move, Mirror), then Delete and More. Show only the tools that apply to the selection.
 - [ ] Hover previews: with the pointer over a tool button, draw a dashed preview of what it would do to the current selection before the tool starts.
 - [ ] Sketch regions: overlapping closed shapes split into separately selectable regions. Clicking a region shows the extrude arrow right away, the region itself can be dragged, more regions can be added while the distance is still 0, and construction geometry never makes regions.
 - [ ] Auto extrude operation: decide new body, add, or cut from the drag direction (on a plane, up is a new body and down is a cut; on a face, out adds and in cuts), with an explicit override. Start at the last-used distance.
