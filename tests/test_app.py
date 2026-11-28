@@ -8,6 +8,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox
 
 from rcad import app as appmod
+from rcad import constraints as constraints_mod  # where the expression dialog is used
+from rcad import model_tools as model_tools_mod  # where the sweep and loft dialogs are used
 from rcad.app import MainWindow
 from rcad.kernel import Feature
 from rcad.sketch import Constraint, Sketch, SketchPlane, standard_plane
@@ -149,7 +151,7 @@ def test_expression_constraint_create_undo_redo_and_roundtrip(qapp, monkeypatch,
         def expression(self):
             return "2*a"
 
-    monkeypatch.setattr(appmod, "ExpressionDialog", AcceptedExpressionDialog)
+    monkeypatch.setattr(constraints_mod, "ExpressionDialog", AcceptedExpressionDialog)
     w.add_constraint("expression")
     assert len(sketch.constraints) == 1
     assert sketch.constraints[0].expression == "2*a"
@@ -319,7 +321,7 @@ def test_sweep_and_loft_actions(qapp, monkeypatch):
     w.doc.rebuild()
     w.refresh()
     w.features.setCurrentRow(0)
-    monkeypatch.setattr(appmod, "SweepDialog", AcceptedSweepDialog)
+    monkeypatch.setattr(model_tools_mod, "SweepDialog", AcceptedSweepDialog)
     w.sweep()
     assert w.doc.features[-1].kind == "sweep"
     assert not w.doc.errors, w.doc.errors
@@ -328,7 +330,7 @@ def test_sweep_and_loft_actions(qapp, monkeypatch):
     w.doc.features = [w.doc.features[2], w.doc.features[3]]
     w.doc.rebuild(0)
     w.refresh()
-    monkeypatch.setattr(appmod, "LoftDialog", AcceptedLoftDialog)
+    monkeypatch.setattr(model_tools_mod, "LoftDialog", AcceptedLoftDialog)
     w.loft()
     assert w.doc.features[-1].kind == "loft"
     assert not w.doc.errors, w.doc.errors

@@ -82,5 +82,5 @@ Interaction ideas taken from superGeometry.app's README (Nov 2026). Several of t
 ## Foundations and release readiness
 
 - [ ] Replace immediate-mode OpenGL rendering with buffered geometry and shaders, keeping selection and overlays responsive on larger models.
-- [ ] Split the large application module into focused UI, interaction, and document modules without changing behavior.
+- [x] Split the large application module into focused UI, interaction, and document modules without changing behavior (mixins on MainWindow: `sketch_tools`, `constraints`, `selection`, `model_tools`, `sessions`, `files`, `dialogs`). Next step: turn the mixins into separate objects one at a time, starting with the sketch editor.
 - [ ] Review dependency licensing, including the SolveSpace/libslvs integration, and choose and document rCad's license before distributing builds.
