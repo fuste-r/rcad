@@ -20,7 +20,7 @@ class Camera:
         self.right = np.array([1.0, 0, 0])
         self.up = np.array([0, 1.0, 0])
         self.back = np.array([0, 0, 1.0])
-        self.orbit(-35, 55)
+        self.look_at_plane(self.target, (1, -1, 1), (1, 1, 0))  # isometric, from the top-front-right
 
     @property
     def eye(self):

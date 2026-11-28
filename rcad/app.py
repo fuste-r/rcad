@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from . import refs
+from . import datum, refs
 from .kernel import Document, Feature
 from .camera import ray_plane
 from .sketch import (
@@ -218,6 +218,7 @@ class MainWindow(QMainWindow):
         self.view.extrude_commit.connect(self.on_extrude_commit)
         self.view.region_extrude.connect(self.on_region_extrude)
         self.view.region_drag = self._region_drag_target
+        self.view.planes_toggled.connect(self._on_planes_toggled)
         self.view.fillet_commit.connect(self.on_fillet_commit)
         self.view.fillet_preview.connect(self.on_fillet_preview)
         self.view.fillet_cancel.connect(self.on_fillet_cancel)
@@ -747,6 +748,7 @@ class MainWindow(QMainWindow):
         self.view.sketch_sel.clear()
         self.view.sel_faces.clear()
         self.view.sel_edges.clear()
+        self.view.sel_plane = None
         for f in self.doc.features:
             if f.kind == "sketch" and (self.mode == "model" or f is self.doc.features[self.sketch_index]):
                 f.sketch.selection = []
@@ -1038,6 +1040,11 @@ class MainWindow(QMainWindow):
                      for k in self._sketch_quick_kinds(pts, lines, circles)]
             delete = ("🗑", self.delete_selection, "Delete the selected sketch items")
             return ("sketch", tuple(sel)), anchor, tools[:2], tools[2:], delete
+        if v.sel_plane is not None:
+            name = v.sel_plane
+            tools = [("✏️ Sketch", lambda name=name: self._sketch_on_plane(name), f"Start a sketch on the {name} plane")]
+            _, u, up = datum.axes(name)  # beside the corner across from the plane's name
+            return ("plane", name), (u - up) * v._datum_half * 0.8, tools, [], None
         mesh = self.doc.mesh
         bodies = self._selected_bodies()
         if bodies:
@@ -1106,6 +1113,17 @@ class MainWindow(QMainWindow):
         """Index of the fillet (by its rounded edges) or fillet/chamfer (by its picked edges) an edge belongs to."""
         i = self._find_fillet_by_edge(tuple(map(float, self.doc.mesh.edges[edge].mid)))
         return i if i is not None else self._feature_for_edge(edge)
+
+    def _sketch_on_plane(self, name: str):
+        """Start a sketch on a reference plane (Top, Front or Right)."""
+        self.view.sel_plane = None
+        self.plane_combo.setCurrentText(datum.PLANES[name][0])
+        self.new_sketch()
+
+    def _on_planes_toggled(self, shown: bool):
+        self.statusBar().showMessage("Reference planes shown (P hides them)" if shown
+                                     else "Reference planes hidden (P shows them)", 4000)
+        self._update_regions()
 
     def _sketch_on_selected_face(self):
         self.plane_combo.setCurrentText("Selected face")
@@ -1759,6 +1777,15 @@ class MainWindow(QMainWindow):
         hit = None if edge is not None else self._pick_region(x, y)
         face = None if edge is not None or hit is not None else v.pick_face(x, y)
         adding = hit is not None and self._picking_regions_of(hit[0])  # more regions for the same extrude
+        plane = None if edge is not None or hit is not None or face is not None else v.pick_plane(x, y)
+        if plane is not None:  # a plane is picked on its own; clicking it again drops it
+            again = plane == v.sel_plane
+            self._clear_model_selection()
+            v.sel_plane = None if again else plane
+            self._update_regions()
+            return
+        if not multi:
+            v.sel_plane = None
         if not multi:
             v.sel_faces.clear()
             v.sel_edges.clear()
@@ -1780,6 +1807,7 @@ class MainWindow(QMainWindow):
     def _clear_model_selection(self):
         self.view.sel_faces.clear()
         self.view.sel_edges.clear()
+        self.view.sel_plane = None
         for f in self.doc.features:
             if f.kind == "sketch":
                 f.sketch.selection = []
@@ -1925,6 +1953,8 @@ class MainWindow(QMainWindow):
             if len(kinds) == 1:
                 return dict(names)[kinds[0]].capitalize()
             return ", ".join(count(kinds.count(k), name) for k, name in names if kinds.count(k))
+        if v.sel_plane is not None:
+            return f"{v.sel_plane} plane"
         mesh = self.doc.mesh
         parts = []
         if v.sel_faces and mesh is not None:
@@ -2020,6 +2050,10 @@ class MainWindow(QMainWindow):
         face = v.pick_face(x, y)
         if face is not None and face not in v.sel_faces:
             self.on_click(x, y, Qt.LeftButton, Qt.NoModifier)
+            return
+        plane = v.pick_plane(x, y) if face is None else None
+        if plane is not None and plane != v.sel_plane:
+            self.on_click(x, y, Qt.LeftButton, Qt.NoModifier)
 
     def _open_selection_menu(self, x, y) -> bool:
         """Pop up the selection's tools (the quick buttons' list) at view point (x, y)."""
@@ -2092,6 +2126,10 @@ class MainWindow(QMainWindow):
         hit = None if edge is not None else self._pick_region(x, y)
         region = None if hit is None else hit[:2]
         face = None if edge is not None or hit is not None else self.view.pick_face(x, y)
+        plane = None if edge is not None or hit is not None or face is not None else self.view.pick_plane(x, y)
+        if plane != self.view.hover_plane:
+            self.view.hover_plane = plane
+            self.view.update()
         if (edge, face) != (self.view.hover_edge, self.view.hover_face) or region != self.hover_region:
             self.view.hover_edge, self.view.hover_face = edge, face
             self.hover_region = region

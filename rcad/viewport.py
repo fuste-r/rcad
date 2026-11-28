@@ -9,7 +9,7 @@ from PySide6.QtGui import QColor, QFont, QImage, QPainter
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QLabel, QRubberBand
 
-from . import viewcube
+from . import datum, viewcube
 from .camera import Camera, FOV_TAN, point_segment_dist, ray_plane, ray_triangles
 from .kernel import MeshData
 from .sketch import Sketch
@@ -28,6 +28,7 @@ class Viewport(QOpenGLWidget):
     scrolled = Signal(float, float, int, object)  # x, y, angle delta, Qt.KeyboardModifier
     extrude_commit = Signal(float, tuple, tuple)  # distance_mm, center, normal
     region_extrude = Signal(float, object)  # distance_mm, the target region_drag returned
+    planes_toggled = Signal(bool)  # P: the reference planes were shown (True) or hidden
     sketch_mouse = Signal(str, float, float)  # phase ("press"|"move"|"release"), x, y
     fillet_commit = Signal(float, list, str)  # size_mm, [edge midpoints], "fillet" (push) | "chamfer" (pull)
     fillet_preview = Signal(float, list, str)  # live size_mm, [edge midpoints], kind
@@ -54,6 +55,11 @@ class Viewport(QOpenGLWidget):
         self.region_fill: list[tuple[np.ndarray, tuple]] = []  # (world triangles, RGBA) for highlighted regions
         self.sketch_sel: set[tuple[str, int]] = set()
         self.preview: list[np.ndarray] = []  # world-space polylines for rubber-banding
+        self.show_planes = True  # the Top, Front and Right reference planes (P toggles them)
+        self.hover_plane: str | None = None
+        self.sel_plane: str | None = None
+        self._datum_half = datum.MIN_HALF
+        self._plane_labels: dict[str, QLabel] = {}
         self.snap_mark = None  # {"kind", "at": world point, "guides": [(world a, world b)]} while drawing
         self.sel_faces: set[int] = set()
         self.sel_edges: set[int] = set()
@@ -94,6 +100,7 @@ class Viewport(QOpenGLWidget):
     # -- data
     def set_mesh(self, mesh: MeshData | None):
         self.mesh = mesh
+        self._datum_half = datum.plane_half(None if mesh is None else mesh.verts)
         self.sel_faces.clear()
         self.sel_edges.clear()
         self.hover_face = self.hover_edge = None
@@ -263,9 +270,11 @@ class Viewport(QOpenGLWidget):
 
         self._draw_grid()
         self._draw_model()
+        self._draw_planes()
         self._draw_extrude_preview()
         self._draw_region_arrow()
         self._draw_sketch()
+        self._draw_origin()
         self._draw_cube()
 
     def _grid_step(self):
@@ -403,6 +412,113 @@ class Viewport(QOpenGLWidget):
         GL.glEnd()
         GL.glLineWidth(1)
         GL.glEnable(GL.GL_LIGHTING)
+
+    # -- origin and reference planes
+    def planes_shown(self) -> bool:
+        return self.show_planes and self.sketch is None
+
+    def pick_plane(self, x, y) -> str | None:
+        """The reference plane under view point (x, y), or None (also while they are hidden)."""
+        if not self.planes_shown():
+            return None
+        o, d = self.camera.ray(x, y, self.width(), self.height())
+        hit = datum.pick(o, d, self._datum_half)
+        return None if hit is None else hit[0]
+
+    def toggle_planes(self):
+        self.show_planes = not self.show_planes
+        if not self.show_planes:
+            self.hover_plane = self.sel_plane = None
+        self.planes_toggled.emit(self.show_planes)
+        self.update()
+
+    def _draw_planes(self):
+        """Translucent squares with thin outlines. The model hides what is behind it; the planes
+        do not hide each other."""
+        if not self.planes_shown():
+            return
+        t, half = self.theme, self._datum_half
+        GL.glDisable(GL.GL_LIGHTING)
+        GL.glEnable(GL.GL_BLEND)
+        GL.glBlendFuncSeparate(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA, GL.GL_ZERO, GL.GL_ONE)
+        GL.glDepthMask(GL.GL_FALSE)
+        GL.glEnable(GL.GL_POLYGON_OFFSET_FILL)
+        GL.glPolygonOffset(1.0, 1.0)  # a model face lying on a plane stays on top of it
+        for name in datum.PLANES:
+            alpha = 0.2 if name == self.sel_plane else 0.14 if name == self.hover_plane else 0.07
+            GL.glColor4f(*t.datum_fill, alpha)
+            GL.glBegin(GL.GL_QUADS)
+            for p in datum.corners(name, half):
+                GL.glVertex3f(*p)
+            GL.glEnd()
+        GL.glDisable(GL.GL_POLYGON_OFFSET_FILL)
+        GL.glDepthMask(GL.GL_TRUE)
+        GL.glDisable(GL.GL_BLEND)
+        for name in datum.PLANES:
+            if name == self.sel_plane:
+                GL.glColor3f(*t.face_select)
+                GL.glLineWidth(2)
+            else:
+                GL.glColor3f(*(t.datum_hover if name == self.hover_plane else t.datum_edge))
+                GL.glLineWidth(1)
+            GL.glBegin(GL.GL_LINE_LOOP)
+            for p in datum.corners(name, half):
+                GL.glVertex3f(*p)
+            GL.glEnd()
+        GL.glLineWidth(1)
+        GL.glEnable(GL.GL_LIGHTING)
+
+    def _draw_origin(self):
+        """A dot in a thin ring at (0, 0, 0), the same size on screen at any zoom, never hidden."""
+        o = np.zeros(3)
+        s = 1.0 / self._px_per_world(o)
+        r, u = self.camera.right * s, self.camera.up * s
+        GL.glDisable(GL.GL_LIGHTING)
+        GL.glDisable(GL.GL_DEPTH_TEST)
+        GL.glEnable(GL.GL_BLEND)
+        GL.glBlendFuncSeparate(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA, GL.GL_ZERO, GL.GL_ONE)
+        GL.glEnable(GL.GL_LINE_SMOOTH)
+        GL.glEnable(GL.GL_POLYGON_SMOOTH)
+        GL.glColor3f(*self.theme.origin)
+        GL.glBegin(GL.GL_TRIANGLE_FAN)  # the dot: 2.5 px radius
+        GL.glVertex3f(*o)
+        for a in np.linspace(0, 2 * np.pi, 21):
+            GL.glVertex3f(*(o + 2.5 * (np.cos(a) * r + np.sin(a) * u)))
+        GL.glEnd()
+        GL.glLineWidth(1.2)
+        GL.glBegin(GL.GL_LINE_LOOP)  # the ring: 7 px radius
+        for a in np.linspace(0, 2 * np.pi, 40, endpoint=False):
+            GL.glVertex3f(*(o + 7.0 * (np.cos(a) * r + np.sin(a) * u)))
+        GL.glEnd()
+        GL.glLineWidth(1)
+        GL.glDisable(GL.GL_POLYGON_SMOOTH)
+        GL.glDisable(GL.GL_LINE_SMOOTH)
+        GL.glDisable(GL.GL_BLEND)
+        GL.glEnable(GL.GL_DEPTH_TEST)
+        GL.glEnable(GL.GL_LIGHTING)
+
+    def _sync_plane_labels(self):
+        """Each plane's name inside its top-left corner; hidden when the plane is seen edge-on."""
+        color = "rgb({}, {}, {})".format(*(int(c * 255) for c in self.theme.datum_text))
+        w, h = self.width(), self.height()
+        for name in datum.PLANES:
+            lbl = self._plane_labels.get(name)
+            if lbl is None:
+                lbl = self._plane_labels[name] = QLabel(name, self)
+                lbl.setAttribute(Qt.WA_TransparentForMouseEvents)
+            n, _, _ = datum.axes(name)
+            facing = abs(float(n @ self.camera.back))
+            s = self.camera.project(datum.label_anchor(name, self._datum_half).reshape(1, 3), w, h)[0]
+            if not self.planes_shown() or facing < 0.2 or np.isnan(s).any():
+                lbl.hide()
+                continue
+            weight = 600 if name in (self.sel_plane, self.hover_plane) else 400
+            lbl.setStyleSheet(f"color: {color}; background: transparent; font-family: sans-serif;"
+                              f" font-size: 11px; font-weight: {weight};")
+            lbl.adjustSize()
+            lbl.move(int(s[0]), int(s[1]))
+            lbl.show()
+            lbl.lower()  # under value boxes, quick buttons and other overlays
 
     def _px_per_world(self, point) -> float:
         depth = max(1e-6, abs(float(np.dot(np.asarray(point, float) - self.camera.eye, self.camera.back))))
@@ -963,6 +1079,9 @@ class Viewport(QOpenGLWidget):
             self.value_box.start_typing(text)
             self.update()
             return
+        if e.key() == Qt.Key_P and not e.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier):
+            self.toggle_planes()  # (typing into a value box above takes the key first)
+            return
         super().keyPressEvent(e)
 
     def _on_box_edited(self, mm: float):
@@ -1098,6 +1217,7 @@ class Viewport(QOpenGLWidget):
 
     def paintEvent(self, e):
         super().paintEvent(e)
+        self._sync_plane_labels()
         self._sync_dim_labels()
         self._sync_value_box()
         self._sync_fields()

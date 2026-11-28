@@ -42,6 +42,7 @@ On Wayland with NVIDIA, if the OpenGL context fails to create, try `QT_QPA_PLATF
 | Pan | middle drag, or Shift + left drag |
 | Zoom | mouse wheel |
 | Standard view (Top, Bottom, Front, Back, Left, Right) | click a face of the cube in the top-right corner; drag the cube to orbit |
+| Reference planes | the Top (XY), Front (XZ), and Right (YZ) planes through the origin highlight under the pointer; click one (where no part of the model is in the way) and use ✏️ Sketch to sketch on it. P hides or shows them |
 | Multi-select | Ctrl + click |
 | Whole body / whole outline | double-click a face or edge (a sketch line selects every line connected to it); Ctrl adds |
 | Move or mirror a body | select it (double-click), then ✥ Move (X/Y/Z offsets, a rotation about X, Y or Z through its centre) or ⇋ Mirror (across the YZ, XZ or XY plane at an offset); Keep: Move/Copy. Bodies that end up touching or overlapping join |
