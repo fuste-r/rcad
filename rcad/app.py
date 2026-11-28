@@ -219,6 +219,7 @@ class MainWindow(QMainWindow):
         self.view.region_extrude.connect(self.on_region_extrude)
         self.view.region_drag = self._region_drag_target
         self.view.planes_toggled.connect(self._on_planes_toggled)
+        self.view.construction_key.connect(self.toggle_construction)
         self.view.fillet_commit.connect(self.on_fillet_commit)
         self.view.fillet_preview.connect(self.on_fillet_preview)
         self.view.fillet_cancel.connect(self.on_fillet_cancel)
@@ -237,6 +238,9 @@ class MainWindow(QMainWindow):
         self._draw_snap = None  # the Snap behind _draw_mouse
         self._snap_text = ""  # what the pointer snaps to, for the status bar
         self._pending_snap = None  # the Snap the pending first point was placed with
+        self._arc_start = None  # arc tool: (point index or None, uv, Snap) of the start, after the centre
+        self._arc_sweep = 0.0  # arc tool: degrees swept by the pointer from the start (+ counter-clockwise)
+        self._arc_angle = 0.0  # arc tool: the pointer's last angle around the centre (degrees)
         self._drawn = None  # shape just drawn whose size boxes stay on it (see _show_drawn)
         # Settings bar for the active feature tool; the feature previews live while it is open
         self.tool_bar = ToolSettingsBar(self.view, lambda: self.unit, lambda: self.doc.variables)
@@ -378,7 +382,7 @@ class MainWindow(QMainWindow):
         self.tool_actions = {}
         draw = []
         for name, text in [("select", "⌖ Select"), ("line", "╱ Line"), ("rect", "⬜ Rectangle"),
-                           ("circle", "◯ Circle")]:
+                           ("circle", "◯ Circle"), ("arc", "◠ Arc")]:
             a = act(text, lambda _=False, n=name: self.set_tool(n), checkable=True)
             group.addAction(a)
             a.setChecked(name == "select")
@@ -390,7 +394,8 @@ class MainWindow(QMainWindow):
         for item in [
                 ("Horizontal", "horizontal"), ("Vertical", "vertical"), ("Coincident", "coincident"),
                 ("Parallel", "parallel"), ("Perpendicular", "perpendicular"), ("Equal", "equal"), None,
-                ("Distance", "distance"), ("Spacing", "spacing"), ("Diameter", "diameter"),
+                ("Tangent", "tangent"), ("Concentric", "concentric"), None,
+                ("Distance", "distance"), ("Spacing", "spacing"), ("Diameter", "diameter"), ("Radius", "radius"),
                 ("Expression", "expression"), None,
                 ("Symmetry", "symmetry"), ("Fixed", "fixed"), ("Point on line", "point_on_line")]:
             if item is None:
@@ -401,6 +406,9 @@ class MainWindow(QMainWindow):
                                    tips.get(text, f"Add a {kind} constraint to the selection")))
         line.add_group("sketch", "Constrain", constraints)
         line.add_group("sketch", "Modify", [
+            act("┄ Construction (Q)", self.toggle_construction,
+                "Make the selected lines, circles and arcs reference geometry (or normal again): dashed, "
+                "used for snapping and constraints, never part of a region"),
             act("🗑 Delete selection", self.delete_selection, "Delete selected sketch items"),
             act("🗑 Delete constraint", self.delete_constraint, "Delete the constraint highlighted in the list"),
         ])
@@ -511,6 +519,7 @@ class MainWindow(QMainWindow):
         self.view.preview = []
         self.pending = None
         self._pending_snap = None
+        self._arc_start = None
         self.view.snap_mark = None
         self.hover_region = None
         self._update_regions()
@@ -550,7 +559,7 @@ class MainWindow(QMainWindow):
         for i, c in enumerate(sk.constraints):
             self.constraints.addItem(f"{i}: {c.label(self.unit)}")
         self.sketch_status.setText(f"{sk.status}  |  {len(sk.points)} points, {len(sk.lines)} lines, "
-                                   f"{len(sk.circles)} circles")
+                                   f"{len(sk.circles)} circles, {len(sk.arcs)} arcs")
 
     @property
     def sketch(self) -> Sketch:
@@ -572,16 +581,13 @@ class MainWindow(QMainWindow):
 
     def _restore_sketch(self, d, index):
         sk = self.doc.features[index].sketch
-        plane = d["plane"]
-        sk.plane = SketchPlane(tuple(plane["origin"]), tuple(plane["xdir"]), tuple(plane["normal"]))
-        sk.points = [list(p) for p in d["points"]]
-        sk.lines = [tuple(l) for l in d["lines"]]
-        sk.circles = [tuple(c) for c in d["circles"]]
-        sk.constraints = [Constraint(**c) for c in d["constraints"]]
-        sk.selection = [tuple(p) for p in d.get("selection", [])]
+        restored = Sketch.from_dict(d)
+        for name in ("plane", "points", "lines", "circles", "arcs", "construction", "constraints", "selection"):
+            setattr(sk, name, getattr(restored, name))
         sk.solve()
         self.pending = None
         self._pending_snap = None
+        self._arc_start = None
         self.view.snap_mark = None
         self.view.preview = []
         self.view.sketch_sel.clear()
@@ -725,6 +731,7 @@ class MainWindow(QMainWindow):
         self.tool = name
         self.pending = None
         self._pending_snap = None
+        self._arc_start = None
         self.view.snap_mark = None
         self.fields.stop()
         self.hover_region = None
@@ -742,6 +749,7 @@ class MainWindow(QMainWindow):
         ending_chain = self.mode == "sketch" and self.tool == "line" and self.pending is not None
         self.pending = None
         self._pending_snap = None
+        self._arc_start = None
         self.view.snap_mark = None
         self.fields.stop()
         self.view.preview = []
@@ -898,6 +906,8 @@ class MainWindow(QMainWindow):
         if kind == "c":
             center, _ = sk.circles[idx]
             return {center: list(sk.points[center])}
+        if kind == "a":  # the whole arc moves
+            return {i: list(sk.points[i]) for i in sk.arcs[idx]}
         return {}
 
     def _finish_sketch_drag(self):
@@ -915,7 +925,7 @@ class MainWindow(QMainWindow):
             hit = self._sketch_press_hit
             if hit is not None:
                 kind, idx = hit
-                label = {"p": f"point {idx}", "l": f"line {idx}", "c": f"circle {idx}"}[kind]
+                label = {"p": f"point {idx}", "l": f"line {idx}", "c": f"circle {idx}", "a": f"arc {idx}"}[kind]
                 self.statusBar().showMessage(f"Dragged {label}.", 2000)
         self.refresh_constraints()
         self._update_regions()
@@ -935,9 +945,9 @@ class MainWindow(QMainWindow):
         if mods is None:
             mods = QApplication.keyboardModifiers()
         start = self.pending if self.tool == "line" else None
+        last = self.pending is not None and (self.tool == "circle" or (self.tool == "arc" and self._arc_start))
         return find_snap(self.sketch, uv, self.SNAP_PX * mm_per_px, grid_step(g, mm_per_px), start=start,
-                         smart=not mods & Qt.ControlModifier,
-                         curves=not (self.tool == "circle" and self.pending is not None))
+                         smart=not mods & Qt.ControlModifier, curves=not last)
 
     SNAP_PX = 10  # how close (screen pixels) the pointer must be for a snap
 
@@ -994,11 +1004,26 @@ class MainWindow(QMainWindow):
         "horizontal": "Horizontal", "vertical": "Vertical", "coincident": "Coincident", "parallel": "Parallel",
         "perpendicular": "Perpendicular", "equal": "Equal", "distance": "Distance", "spacing": "Spacing",
         "diameter": "Diameter", "expression": "Expression", "fixed": "Fixed", "point_on_line": "Point on line",
-        "midpoint": "Midpoint", "point_on_circle": "Point on circle",
+        "midpoint": "Midpoint", "point_on_circle": "Point on circle", "point_on_arc": "Point on arc",
+        "radius": "Radius", "tangent": "Tangent", "concentric": "Concentric",
     }
 
-    def _sketch_quick_kinds(self, pts, lines, circles) -> list[str]:
+    def _sketch_quick_kinds(self, pts, lines, circles, arcs=()) -> list[str]:
         """Constraints that fit a sketch selection, likeliest first (same rules as add_constraint)."""
+        if arcs:
+            if len(arcs) == 1 and not pts and not lines and not circles:
+                return ["radius"]
+            if len(arcs) == 1 and len(lines) == 1 and not pts and not circles:
+                return ["tangent"]
+            if len(arcs) == 2 and not pts and not lines and not circles:
+                return ["tangent", "concentric"]
+            if len(arcs) + len(circles) == 2 and not pts and not lines:
+                return ["concentric"]
+            if len(pts) == 1 and len(arcs) == 1 and not lines and not circles:
+                return ["point_on_arc"]
+            return []
+        if len(circles) == 2 and not pts and not lines:
+            return ["concentric"]
         if lines and not pts and not circles:
             if len(lines) == 1:
                 return ["distance", "horizontal", "vertical"]
@@ -1027,19 +1052,28 @@ class MainWindow(QMainWindow):
             pts = [i for k, i in sel if k == "p"]
             lines = [i for k, i in sel if k == "l"]
             circles = [i for k, i in sel if k == "c"]
+            arcs = [i for k, i in sel if k == "a"]
             try:
                 uvs = [sk.points[i] for i in pts]
                 uvs += [np.mean([sk.points[a], sk.points[b]], axis=0) for a, b in (sk.lines[i] for i in lines)]
                 uvs += [sk.points[sk.circles[i][0]] for i in circles]
+                uvs += [sk.arc_polyline(i, 3)[1] for i in arcs]
             except IndexError:
                 return None
             if not uvs:
                 return None
             anchor = np.asarray(sk.plane.to3d(*np.mean(uvs, axis=0)), float)
             tools = [(self.CONSTRAINT_LABELS[k], lambda k=k: self.add_constraint(k), f"Add a {k} constraint")
-                     for k in self._sketch_quick_kinds(pts, lines, circles)]
+                     for k in self._sketch_quick_kinds(pts, lines, circles, arcs)]
+            more = tools[2:]
+            if lines or circles or arcs:
+                curves = [(k, i) for k, i in sel if k != "p"]
+                on = not all(sk.is_construction(k, i) for k, i in curves)
+                more.append(("┄ Construction" if on else "━ Normal geometry", self.toggle_construction,
+                             "Reference geometry: dashed, for snapping and constraints, never part of a region"
+                             if on else "Make the selected reference geometry normal again (Q)"))
             delete = ("🗑", self.delete_selection, "Delete the selected sketch items")
-            return ("sketch", tuple(sel)), anchor, tools[:2], tools[2:], delete
+            return ("sketch", tuple(sel)), anchor, tools[:2], more, delete
         if v.sel_plane is not None:
             name = v.sel_plane
             tools = [("✏️ Sketch", lambda name=name: self._sketch_on_plane(name), f"Start a sketch on the {name} plane")]
@@ -1281,6 +1315,7 @@ class MainWindow(QMainWindow):
         "line": [("L", "L", "length"), ("A", "∠", "angle")],
         "rect": [("W", "W", "length"), ("H", "H", "length")],
         "circle": [("D", "Ø", "length")],
+        "arc": [("R", "R", "length"), ("S", "∠", "angle")],  # radius, then the angle it sweeps
     }
 
     def _apply_locks(self, p0, uv):
@@ -1308,7 +1343,38 @@ class MainWindow(QMainWindow):
             n = math.hypot(du, dv)
             ux, uy = (du / n, dv / n) if n > 1e-12 else (1.0, 0.0)
             return p0[0] + abs(d) / 2 * ux, p0[1] + abs(d) / 2 * uy
+        if self.tool == "arc":
+            if self._arc_start is None:  # placing the start: the radius
+                r = f.locked("R")
+                if r is None:
+                    return uv
+                n = math.hypot(du, dv)
+                ux, uy = (du / n, dv / n) if n > 1e-12 else (1.0, 0.0)
+                return p0[0] + abs(r) * ux, p0[1] + abs(r) * uy
+            return self._arc_end(p0, uv)
         return uv
+
+    def _arc_end(self, center, uv):
+        """Where the arc's end goes: on its radius, at the typed sweep angle or toward the pointer."""
+        su, sv = self._arc_start[1]
+        r = math.dist(center, (su, sv))
+        sweep = self.fields.locked("S") if self.fields.active else None
+        if sweep is None:
+            a = math.atan2(uv[1] - center[1], uv[0] - center[0])
+        else:
+            a = math.atan2(sv - center[1], su - center[0]) + math.radians(sweep)
+        return center[0] + r * math.cos(a), center[1] + r * math.sin(a)
+
+    def _track_arc_sweep(self, center, uv):
+        """Follow the pointer around the centre, so the arc goes the way it was dragged."""
+        a = math.degrees(math.atan2(uv[1] - center[1], uv[0] - center[0]))
+        step = (a - self._arc_angle + 180) % 360 - 180
+        self._arc_sweep = max(-359.9, min(359.9, self._arc_sweep + step))
+        self._arc_angle = a
+
+    def _arc_sweep_now(self) -> float:
+        typed = self.fields.locked("S") if self.fields.active else None
+        return typed if typed is not None else self._arc_sweep
 
     def _field_values(self, p0, uv) -> dict:
         du, dv = uv[0] - p0[0], uv[1] - p0[1]
@@ -1318,6 +1384,10 @@ class MainWindow(QMainWindow):
             return {"W": abs(du), "H": abs(dv)}
         if self.tool == "circle":
             return {"D": 2 * math.hypot(du, dv)}
+        if self.tool == "arc":
+            if self._arc_start is None:
+                return {"R": math.hypot(du, dv), "S": 0.0}
+            return {"R": math.dist(p0, self._arc_start[1]), "S": self._arc_sweep_now()}
         return {}
 
     # -- boxes left on a shape after it is drawn
@@ -1534,6 +1604,53 @@ class MainWindow(QMainWindow):
                 self._show_drawn({"tool": "circle", "circle": ci})
             else:
                 self.set_tool("select")
+        elif self.tool == "arc":
+            if self.pending is None:  # the centre
+                self.pending = (pi, uv)
+                self._start_fields()
+                return
+            c_idx, c_uv = self.pending
+            if self._arc_start is None:  # the start, which sets the radius
+                if math.dist(c_uv, uv) < 1e-9:
+                    return
+                self._arc_start = (pi, tuple(uv), snap)
+                self._arc_sweep = 0.0
+                self._arc_angle = math.degrees(math.atan2(uv[1] - c_uv[1], uv[0] - c_uv[0]))
+                self.fields.set_values(self._field_values(c_uv, uv))
+                return
+            self._finish_arc(c_idx, c_uv, pi, uv, start_snap)
+
+    def _finish_arc(self, c_idx, c_uv, pi, uv, centre_snap):
+        """Third click of the arc tool: add the arc from its start to the end on its radius.
+        The sweep tracked while the pointer moved decides the side; its direction, the end."""
+        sk = self.sketch
+        s_idx, s_uv, s_snap = self._arc_start
+        sweep = self._arc_sweep_now()
+        if self.fields.locked("S") is None:
+            a_ptr = math.degrees(math.atan2(uv[1] - c_uv[1], uv[0] - c_uv[0]))
+            a0 = math.degrees(math.atan2(s_uv[1] - c_uv[1], s_uv[0] - c_uv[0]))
+            ccw = (a_ptr - a0) % 360
+            sweep = ccw if sweep >= 0 else ccw - 360
+        if abs(sweep) < 0.5 or abs(sweep) > 359.5:
+            return  # nothing yet, or a whole circle: keep drawing
+        r = math.dist(c_uv, s_uv)
+        a = math.atan2(s_uv[1] - c_uv[1], s_uv[0] - c_uv[0]) + math.radians(sweep)
+        e_uv = (c_uv[0] + r * math.cos(a), c_uv[1] + r * math.sin(a))
+        c = c_idx if c_idx is not None else sk.add_point(*c_uv)
+        s = s_idx if s_idx is not None else sk.add_point(*s_uv)
+        reuse = pi is not None and pi not in (c, s) and abs(math.dist(sk.points[pi], c_uv) - r) < 1e-6 * max(r, 1)
+        e = pi if reuse else sk.add_point(*e_uv)
+        if sweep > 0:
+            sk.add_arc(c, s, e)
+        else:
+            sk.add_arc(c, e, s)
+        sk.version += 1
+        cons = centre_snap.constraints(c) if centre_snap is not None and c_idx is None else []
+        cons += s_snap.constraints(s) if s_snap is not None and s_idx is None else []
+        self._auto_constrain(cons)
+        self._solve_sketch()
+        self.set_tool("select")
+        self.statusBar().showMessage(f"Arc R {self.unit.fmt(r)}, {abs(sweep):.4g}°", 4000)
 
     def _update_preview(self, x, y):
         snap = self._snap(x, y)
@@ -1544,6 +1661,8 @@ class MainWindow(QMainWindow):
             return
         self._draw_mouse = (snap.point, snap.uv, x, y)
         self._draw_snap = snap
+        if self.tool == "arc" and self._arc_start is not None:
+            self._track_arc_sweep(self.pending[1], snap.uv)
         self._show_draw_preview(snap.uv, x, y)
 
     def _show_draw_preview(self, uv, x, y):
@@ -1565,6 +1684,18 @@ class MainWindow(QMainWindow):
             self.view.preview = [np.array([pl.to3d(*p) for p in c])]
         elif self.tool == "circle":
             self.view.preview = [np.array(Viewport._circle_world(pl, p0, math.dist(p0, uv)))]
+        elif self.tool == "arc":
+            if self._arc_start is None:  # the radius, and the circle the arc will lie on
+                self.view.preview = [np.array([pl.to3d(*p0), pl.to3d(*uv)]),
+                                     np.array(Viewport._circle_world(pl, p0, math.dist(p0, uv)))]
+            else:
+                su, sv = self._arc_start[1]
+                r = math.dist(p0, (su, sv))
+                a0, sweep = math.atan2(sv - p0[1], su - p0[0]), math.radians(self._arc_sweep_now())
+                arc = [pl.to3d(p0[0] + r * math.cos(a0 + sweep * t), p0[1] + r * math.sin(a0 + sweep * t))
+                       for t in np.linspace(0, 1, 64)]
+                self.view.preview = [np.array([pl.to3d(*p0), pl.to3d(su, sv)]), np.array(arc),
+                                     np.array([pl.to3d(*p0), arc[-1]])]
         self.view.update()
         u = self.unit
         snapped = f"   ·   snap: {self._snap_text}" if self._snap_text else ""
@@ -1579,10 +1710,36 @@ class MainWindow(QMainWindow):
         pts = [i for k, i in sel if k == "p"]
         lines = [i for k, i in sel if k == "l"]
         circles = [i for k, i in sel if k == "c"]
+        arcs = [i for k, i in sel if k == "a"]
         new: list[Constraint] = []
         value = None
+        if arcs and kind not in ("radius", "tangent", "concentric", "point_on_arc", "symmetry", "fixed"):
+            self.statusBar().showMessage(f"'{kind}' does not apply to arcs.", 6000)
+            return
         try:
-            if kind in ("horizontal", "vertical"):
+            if kind == "radius":
+                if len(arcs) == 1 and not pts and not lines and not circles:
+                    cur = sk.arc_geometry(arcs[0])[1]
+                    return self._constraint_session("Radius", Constraint("radius", arcs, cur), new=True)
+            elif kind == "tangent":
+                if len(lines) == 1 and len(arcs) == 1 and not pts and not circles:
+                    if not set(sk.lines[lines[0]]) & set(sk.arcs[arcs[0]][1:]):
+                        self.statusBar().showMessage("The line must end where the arc ends.", 6000)
+                        return
+                    new = [Constraint("tangent", [lines[0], arcs[0]])]
+                elif len(arcs) == 2 and not pts and not lines and not circles:
+                    if not set(sk.arcs[arcs[0]][1:]) & set(sk.arcs[arcs[1]][1:]):
+                        self.statusBar().showMessage("The arcs must share an end.", 6000)
+                        return
+                    new = [Constraint("tangent_arcs", arcs)]
+            elif kind == "concentric":
+                centres = [sk.circles[i][0] for i in circles] + [sk.arcs[i][0] for i in arcs]
+                if len(centres) == 2 and not pts and not lines and centres[0] != centres[1]:
+                    new = [Constraint("coincident", centres)]
+            elif kind == "point_on_arc":
+                if len(pts) == 1 and len(arcs) == 1 and not lines and not circles:
+                    new = [Constraint("point_on_arc", [pts[0], arcs[0]])]
+            elif kind in ("horizontal", "vertical"):
                 if len(lines) == 1 and not pts and not circles:
                     new = [Constraint(kind, lines)]
                 elif len(pts) == 2 and not lines and not circles:
@@ -1647,9 +1804,9 @@ class MainWindow(QMainWindow):
                         return
                 else:
                     # We have a mirror axis; mirror the selected items
-                    if not pts and not lines and not circles:
+                    if not pts and not lines and not circles and not arcs:
                         self.statusBar().showMessage(
-                            "Select points, lines, or circles to mirror (or press Escape to cancel).", 6000
+                            "Select points, lines, circles or arcs to mirror (or press Escape to cancel).", 6000
                         )
                         return
                     self._push_sketch_undo()
@@ -1691,6 +1848,10 @@ class MainWindow(QMainWindow):
                         new_center_idx = mirrored_point(center_idx)
                         sk.circles.append((new_center_idx, r))
 
+                    for ai in arcs:  # a mirror image runs the other way round: swap its ends
+                        c0, s0, e0 = sk.arcs[ai]
+                        sk.add_arc(mirrored_point(c0), mirrored_point(e0), mirrored_point(s0))
+
                     if new_constraints:
                         sk.constraints += new_constraints
                         sk.version += 1
@@ -1699,7 +1860,7 @@ class MainWindow(QMainWindow):
                         self.view.sketch_sel.clear()
                         self._solve_sketch()
                         self.statusBar().showMessage(
-                            f"Mirrored {len(pts) + len(lines) + len(circles)} item(s).", 6000
+                            f"Mirrored {len(pts) + len(lines) + len(circles) + len(arcs)} item(s).", 6000
                         )
                     else:
                         self.statusBar().showMessage(
@@ -1711,7 +1872,8 @@ class MainWindow(QMainWindow):
         except IndexError:
             new = []
         if not new:
-            self.statusBar().showMessage(f"Select the right items for '{kind}' ({CONSTRAINT_KINDS[kind][0]}).", 6000)
+            needs = {"concentric": "two circles or arcs"}.get(kind) or CONSTRAINT_KINDS[kind][0]
+            self.statusBar().showMessage(f"Select the right items for '{kind}' ({needs}).", 6000)
             return
         sk.constraints += new
         sk.version += 1
@@ -1751,10 +1913,28 @@ class MainWindow(QMainWindow):
             self.sketch.version += 1
             self._solve_sketch()
 
+    def toggle_construction(self):
+        """Q: selected lines, circles and arcs become reference geometry, or normal again if they all are."""
+        if self.mode != "sketch":
+            return
+        sk = self.sketch
+        curves = [(k, i) for k, i in self.view.sketch_sel if k in ("l", "c", "a")]
+        if not curves:
+            self.statusBar().showMessage("Select lines, circles or arcs to make them construction geometry.", 6000)
+            return
+        self._push_sketch_undo()
+        on = not all(sk.is_construction(k, i) for k, i in curves)
+        sk.set_construction(curves, on)
+        sk.version += 1
+        self.statusBar().showMessage(f"{len(curves)} item(s) {'made construction' if on else 'made normal'}.", 4000)
+        self.mark_dirty()
+        self._update_regions()
+        self.view.update()
+
     def delete_selection(self):
         self._push_sketch_undo()
         sk = self.sketch
-        for kind in ("l", "c", "p"):  # deleting points last keeps the other indices stable
+        for kind in ("l", "c", "a", "p"):  # deleting points last keeps the other indices stable
             for idx in sorted((i for k, i in self.view.sketch_sel if k == kind), reverse=True):
                 sk.delete(kind, idx)
         sk.version += 1
@@ -1862,22 +2042,25 @@ class MainWindow(QMainWindow):
         self._update_regions()
 
     def _sketch_chain(self, hit) -> set:
-        """The lines connected (through shared points) to a sketch line or point; a circle alone."""
+        """The lines and arcs joined end to end (through shared points) with a sketch line, arc or
+        point; a circle alone."""
         kind, i = hit
         if kind == "c":
             return {hit}
         sk = self.sketch
-        points = {i} if kind == "p" else set(sk.lines[i])
-        lines = set() if kind == "p" else {i}
+        ends = {("l", j): set(ab) for j, ab in enumerate(sk.lines)}
+        ends.update({("a", j): {a, b} for j, (_, a, b) in enumerate(sk.arcs)})
+        points = {i} if kind == "p" else set(ends[hit])
+        chain = set() if kind == "p" else {hit}
         grew = True
         while grew:
             grew = False
-            for j, (a, b) in enumerate(sk.lines):
-                if j not in lines and (a in points or b in points):
-                    lines.add(j)
-                    points |= {a, b}
+            for item, pts in ends.items():
+                if item not in chain and pts & points:
+                    chain.add(item)
+                    points |= pts
                     grew = True
-        return {("l", j) for j in lines} if lines else {hit}
+        return chain or {hit}
 
     def select_all(self):
         """Ctrl+A: every body in the model, or everything in the sketch."""
@@ -1888,7 +2071,7 @@ class MainWindow(QMainWindow):
                 self.set_tool("select")
             sk = self.sketch
             v.sketch_sel = ({("p", i) for i in range(len(sk.points))} | {("l", i) for i in range(len(sk.lines))}
-                            | {("c", i) for i in range(len(sk.circles))})
+                            | {("c", i) for i in range(len(sk.circles))} | {("a", i) for i in range(len(sk.arcs))})
         else:
             self._clear_model_selection()
             if self.doc.mesh is not None:
@@ -1919,6 +2102,7 @@ class MainWindow(QMainWindow):
                 u, vv = sk.points[c]
                 if inside([to3((u + r * np.cos(t), vv + r * np.sin(t))) for t in ring]):
                     found.add(("c", i))
+            found |= {("a", i) for i in range(len(sk.arcs)) if inside([to3(q) for q in sk.arc_polyline(i, 24)])}
             if not mods & Qt.ControlModifier:
                 v.sketch_sel.clear()
             v.sketch_sel |= found
@@ -1949,7 +2133,7 @@ class MainWindow(QMainWindow):
 
         if self.mode == "sketch":
             kinds = [k for k, _ in v.sketch_sel]
-            names = [("p", "point"), ("l", "line"), ("c", "circle")]
+            names = [("p", "point"), ("l", "line"), ("c", "circle"), ("a", "arc")]
             if len(kinds) == 1:
                 return dict(names)[kinds[0]].capitalize()
             return ", ".join(count(kinds.count(k), name) for k, name in names if kinds.count(k))

@@ -29,6 +29,7 @@ class Viewport(QOpenGLWidget):
     extrude_commit = Signal(float, tuple, tuple)  # distance_mm, center, normal
     region_extrude = Signal(float, object)  # distance_mm, the target region_drag returned
     planes_toggled = Signal(bool)  # P: the reference planes were shown (True) or hidden
+    construction_key = Signal()  # Q in a sketch: toggle construction geometry
     sketch_mouse = Signal(str, float, float)  # phase ("press"|"move"|"release"), x, y
     fillet_commit = Signal(float, list, str)  # size_mm, [edge midpoints], "fillet" (push) | "chamfer" (pull)
     fillet_preview = Signal(float, list, str)  # live size_mm, [edge midpoints], kind
@@ -191,7 +192,7 @@ class Viewport(QOpenGLWidget):
         return pl, pts
 
     def pick_sketch(self, x, y, px=8.0):
-        """Nearest sketch entity as ('p'|'l'|'c', index); points win over lines over circles."""
+        """Nearest sketch entity as ('p'|'l'|'c'|'a', index); points win over lines over circles and arcs."""
         sk = self.sketch
         if sk is None or not sk.points:
             return None
@@ -217,6 +218,13 @@ class Viewport(QOpenGLWidget):
                 dd = point_segment_dist(m, ring[:-1], ring[1:]).min()
                 if dd < best_d:
                     best, best_d = ("c", i), dd
+        for i in range(len(sk.arcs)):
+            ring = self.camera.project(np.array([pl.to3d(*q) for q in sk.arc_polyline(i)]), w, h)
+            ring = ring[~np.isnan(ring).any(1)]
+            if len(ring) > 1:
+                dd = point_segment_dist(m, ring[:-1], ring[1:]).min()
+                if dd < best_d:
+                    best, best_d = ("a", i), dd
         return best
 
     def nearest_sketch_point(self, x, y, px=10.0) -> int | None:
@@ -581,19 +589,28 @@ class Viewport(QOpenGLWidget):
         def col(kind, i):
             GL.glColor3f(*(self.theme.sketch_select if (kind, i) in selected else base_color))
 
-        GL.glLineWidth(2.5)
-        for i, (a, b) in enumerate(sk.lines):
-            col("l", i)
-            GL.glBegin(GL.GL_LINES)
-            GL.glVertex3f(*world[a])
-            GL.glVertex3f(*world[b])
-            GL.glEnd()
-        for i, (c, r) in enumerate(sk.circles):
-            col("c", i)
+        def stroke(kind, i, pts):
+            """A curve; construction geometry is thin and dashed."""
+            col(kind, i)
+            dashed = sk.is_construction(kind, i)
+            GL.glLineWidth(1.5 if dashed else 2.5)
+            if dashed:
+                GL.glEnable(GL.GL_LINE_STIPPLE)
+                GL.glLineStipple(3, 0x5555)
             GL.glBegin(GL.GL_LINE_STRIP)
-            for p in self._circle_world(pl, sk.points[c], r):
+            for p in pts:
                 GL.glVertex3f(*p)
             GL.glEnd()
+            if dashed:
+                GL.glDisable(GL.GL_LINE_STIPPLE)
+
+        for i, (a, b) in enumerate(sk.lines):
+            stroke("l", i, (world[a], world[b]))
+        for i, (c, r) in enumerate(sk.circles):
+            stroke("c", i, self._circle_world(pl, sk.points[c], r))
+        for i in range(len(sk.arcs)):
+            stroke("a", i, [pl.to3d(*q) for q in sk.arc_polyline(i)])
+        GL.glLineWidth(2.5)
         GL.glPointSize(8)
         GL.glBegin(GL.GL_POINTS)
         for i, p in enumerate(world):
@@ -1082,6 +1099,10 @@ class Viewport(QOpenGLWidget):
         if e.key() == Qt.Key_P and not e.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier):
             self.toggle_planes()  # (typing into a value box above takes the key first)
             return
+        if e.key() == Qt.Key_Q and self.sketch is not None and not e.modifiers() & (
+                Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier):
+            self.construction_key.emit()
+            return
         super().keyPressEvent(e)
 
     def _on_box_edited(self, mm: float):
@@ -1252,13 +1273,16 @@ class Viewport(QOpenGLWidget):
                 elif c.kind == "diameter":
                     center = self.sketch.points[self.sketch.circles[c.refs[0]][0]]
                     mid = (center[0]+0.5, center[1])
+                elif c.kind == "radius":
+                    mid = self.sketch.arc_polyline(c.refs[0], 3)[1]  # the arc's middle
                 else:
                     continue
                 pt = np.array(pl.to3d(*mid), dtype=float).reshape(1,3)
                 sx, sy = self.camera.project(pt, w, h)[0][:2]
                 if np.isnan(sx) or np.isnan(sy):
                     continue
-                positions.append((int(sx), int(sy), self.unit.fmt(c.value)))
+                prefix = "R " if c.kind == "radius" else ""
+                positions.append((int(sx), int(sy), prefix + self.unit.fmt(c.value)))
             except Exception:
                 continue
         while len(self._dim_labels) < len(positions):

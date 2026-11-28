@@ -16,6 +16,7 @@ class Snap:
     point: int | None = None  # existing point the pointer is on (reused, so it is coincident)
     line: int | None = None  # line for midpoint / on_line
     circle: int | None = None  # circle for on_circle
+    arc: int | None = None  # arc for on_arc
     align: list[tuple[str, int]] = field(default_factory=list)  # ("h" same v | "v" same u, point or START)
 
     def constraints(self, p: int, start: int | None = None) -> list[Constraint]:
@@ -28,6 +29,8 @@ class Snap:
             out.append(Constraint("point_on_line", [p, self.line]))
         elif self.circle is not None:
             out.append(Constraint("point_on_circle", [p, self.circle]))
+        elif self.arc is not None:
+            out.append(Constraint("point_on_arc", [p, self.arc]))
         for axis, ref in self.align:
             ref = start if ref == START else ref
             if ref is not None and ref != p:
@@ -35,11 +38,13 @@ class Snap:
         return out
 
     def describe(self, sk: Sketch) -> str:
-        names = {"point": "point", "midpoint": "midpoint", "on_line": "on line", "on_circle": "on circle"}
+        names = {"point": "point", "midpoint": "midpoint", "on_line": "on line", "on_circle": "on circle",
+                 "on_arc": "on arc"}
         parts = [names[self.kind]] if self.kind in names else []
         for axis, ref in self.align:
             what = ("the start" if ref == START
-                    else "a circle centre" if any(c == ref for c, _ in sk.circles) else "a point")
+                    else "a circle centre" if any(c == ref for c, _ in sk.circles)
+                    else "an arc centre" if any(a[0] == ref for a in sk.arcs) else "a point")
             parts.append(f"{'horizontal' if axis == 'h' else 'vertical'} with {what}")
         return ", ".join(parts)
 
@@ -116,10 +121,8 @@ def find_snap(sk: Sketch, uv, tol: float, grid: float = 0.0, start=None, smart: 
         for axis, (r, p) in align.items():
             hit = _curve_cross(sk, kind, idx, axis, p, uv)
             if hit is not None and math.dist(hit, uv) <= tol * 1.5:
-                return Snap(hit, "on_" + kind, line=idx if kind == "line" else None,
-                            circle=idx if kind == "circle" else None, align=[(axis, r)])
-        return Snap(foot, "on_" + kind, line=idx if kind == "line" else None,
-                    circle=idx if kind == "circle" else None)
+                return Snap(hit, "on_" + kind, **{kind: idx}, align=[(axis, r)])
+        return Snap(foot, "on_" + kind, **{kind: idx})
 
     # 4. alignment: both axes pin the point; one axis pins one coordinate and the grid the other
     if align:
@@ -145,6 +148,15 @@ def _nearest_curve(sk: Sketch, uv, tol):
         if r > 1e-9 and d0 > 1e-12 and abs(d0 - r) <= best_d:
             best_d = abs(d0 - r)
             best = ("circle", i, (cu + (uv[0] - cu) * r / d0, cv + (uv[1] - cv) * r / d0))
+    for i in range(len(sk.arcs)):
+        (cu, cv), r, a0, sweep = sk.arc_geometry(i)
+        d0 = math.dist((cu, cv), uv)
+        if r < 1e-9 or d0 < 1e-12 or abs(d0 - r) > best_d:
+            continue
+        if (math.atan2(uv[1] - cv, uv[0] - cu) - a0) % (2 * math.pi) > sweep:
+            continue  # beside the arc's gap
+        best_d = abs(d0 - r)
+        best = ("arc", i, (cu + (uv[0] - cu) * r / d0, cv + (uv[1] - cv) * r / d0))
     return best
 
 
@@ -170,6 +182,8 @@ def _curve_cross(sk: Sketch, kind, idx, axis, ref, uv):
         if not -1e-9 <= t <= 1 + 1e-9:
             return None
         return (a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]))
+    if kind != "circle":
+        return None  # (arcs: plain on-arc snap)
     c, r = sk.circles[idx]
     center = sk.points[c]
     off = level - center[k]

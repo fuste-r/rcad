@@ -35,6 +35,10 @@ CONSTRAINT_KINDS = {
     "point_on_line": ("pl", False),
     "midpoint": ("pl", False),
     "point_on_circle": ("pc", False),
+    "point_on_arc": ("pa", False),
+    "radius": ("a", True),
+    "tangent": ("la", False),  # a line and an arc that share an end point
+    "tangent_arcs": ("aa", False),  # two arcs that share an end point
     "expression": ("pp", True),
     "symmetry": ("ppl", False),
 }
@@ -114,6 +118,8 @@ class Sketch:
     points: list[list[float]] = field(default_factory=list)
     lines: list[tuple[int, int]] = field(default_factory=list)
     circles: list[tuple[int, float]] = field(default_factory=list)  # (center point, radius)
+    arcs: list[tuple[int, int, int]] = field(default_factory=list)  # (center, start, end), counter-clockwise
+    construction: set = field(default_factory=set)  # ("l" | "c" | "a", index): reference geometry, no regions
     constraints: list[Constraint] = field(default_factory=list)
     selection: list[tuple[float, float]] = field(default_factory=list)  # points inside the highlighted regions
     variables: dict[str, float] = field(default_factory=dict)  # expression variables
@@ -135,6 +141,34 @@ class Sketch:
         self.circles.append((center, r))
         return len(self.circles) - 1
 
+    def add_arc(self, center: int, start: int, end: int) -> int:
+        """An arc around `center` running counter-clockwise from `start` to `end` (radius: center to start)."""
+        self.arcs.append((center, start, end))
+        return len(self.arcs) - 1
+
+    def arc_geometry(self, i: int):
+        """(center uv, radius, start angle, sweep) of arc i, angles in radians, sweep in (0, 2 pi]."""
+        c, s, e = self.arcs[i]
+        cu, cv = self.points[c]
+        a0 = math.atan2(self.points[s][1] - cv, self.points[s][0] - cu)
+        a1 = math.atan2(self.points[e][1] - cv, self.points[e][0] - cu)
+        sweep = (a1 - a0) % (2 * math.pi)
+        return (cu, cv), math.dist(self.points[c], self.points[s]), a0, sweep or 2 * math.pi
+
+    def arc_polyline(self, i: int, n: int = 48) -> list[tuple[float, float]]:
+        """Points along arc i in sketch coordinates, from its start to its end."""
+        (cu, cv), r, a0, sweep = self.arc_geometry(i)
+        return [(cu + r * math.cos(a0 + sweep * t), cv + r * math.sin(a0 + sweep * t))
+                for t in np.linspace(0, 1, n)]
+
+    def is_construction(self, kind: str, i: int) -> bool:
+        return (kind, i) in self.construction
+
+    def set_construction(self, items, on: bool):
+        for k, i in items:
+            if k in ("l", "c", "a"):
+                (self.construction.add if on else self.construction.discard)((k, i))
+
     def add_rect(self, u0, v0, u1, v1):
         p = [self.add_point(u0, v0), self.add_point(u1, v0), self.add_point(u1, v1), self.add_point(u0, v1)]
         ls = [self.add_line(p[i], p[(i + 1) % 4]) for i in range(4)]
@@ -151,13 +185,21 @@ class Sketch:
                 self.delete("l", i)
             for i in sorted((i for i, (c, _) in enumerate(self.circles) if c == idx), reverse=True):
                 self.delete("c", i)
+            for i in sorted((i for i, arc in enumerate(self.arcs) if idx in arc), reverse=True):
+                self.delete("a", i)
             del self.points[idx]
             self.lines = [(a - (a > idx), b - (b > idx)) for a, b in self.lines]
             self.circles = [(c - (c > idx), r) for c, r in self.circles]
+            self.arcs = [tuple(p - (p > idx) for p in arc) for arc in self.arcs]
         elif kind == "l":
             del self.lines[idx]
         elif kind == "c":
             del self.circles[idx]
+        elif kind == "a":
+            del self.arcs[idx]
+        if kind != "p":
+            self.construction = {(k, i - (k == kind and i > idx)) for k, i in self.construction
+                                 if (k, i) != (kind, idx)}
         kept = []
         for c in self.constraints:
             types = CONSTRAINT_KINDS[c.kind][0]
@@ -179,6 +221,7 @@ class Sketch:
         n2 = s.addNormal2d(wp, g)
         radii = [s.addDistanceV(r, g) for _, r in self.circles]
         circles = [s.addCircle(pts[c], n2, radii[i], g) for i, (c, _) in enumerate(self.circles)]
+        arcs = [s.addArcOfCircle(wp, pts[c], pts[a], pts[b], g) for c, a, b in self.arcs]
         handle_to_constraint = {}
         for ci, c in enumerate(self.constraints):
             r = c.refs
@@ -235,6 +278,22 @@ class Sketch:
                 h = s.addMidPoint(pts[r[0]], lines[r[1]], wp, g)
             elif k == "point_on_circle":
                 h = s.addPointOnCircle(pts[r[0]], circles[r[1]], g)
+            elif k == "point_on_arc":
+                h = s.addPointOnCircle(pts[r[0]], arcs[r[1]], g)
+            elif k == "radius":
+                h = s.addDiameter(2 * c.value, arcs[r[0]], g)
+            elif k == "tangent":
+                shared = set(self.lines[r[0]]) & set(self.arcs[r[1]][1:])
+                if not shared:
+                    raise ValueError("a tangent line and arc must share an end point")
+                h = s.addArcLineTangent(self.arcs[r[1]][2] in shared, arcs[r[1]], lines[r[0]], g)
+            elif k == "tangent_arcs":
+                (_, s1, e1), (_, s2, e2) = self.arcs[r[0]], self.arcs[r[1]]
+                shared = {s1, e1} & {s2, e2}
+                if not shared:
+                    raise ValueError("tangent arcs must share an end point")
+                p = shared.pop()
+                h = s.addCurvesTangent(p == e1, p == e2, arcs[r[0]], arcs[r[1]], wp, g)
             else:
                 raise ValueError(f"unknown constraint {k}")
             for handle in h if isinstance(h, tuple) else (h,):
@@ -257,20 +316,30 @@ class Sketch:
     def _curves(self) -> list:
         """The sketch's lines and circles as edges on the local plane (z = 0)."""
         edges = []
-        for a, b in self.lines:
+        for i, (a, b) in enumerate(self.lines):
             (u0, v0), (u1, v1) = self.points[a], self.points[b]
-            if math.hypot(u1 - u0, v1 - v0) > 1e-9:
+            if math.hypot(u1 - u0, v1 - v0) > 1e-9 and ("l", i) not in self.construction:
                 edges.append(Edge.make_line((u0, v0, 0), (u1, v1, 0)))
-        for c, r in self.circles:
-            if r > 1e-9:
+        for i, (c, r) in enumerate(self.circles):
+            if r > 1e-9 and ("c", i) not in self.construction:
                 u, v = self.points[c]
                 edges.append(Edge.make_circle(r, Plane(origin=(u, v, 0))))
+        for i, (c, a, b) in enumerate(self.arcs):
+            if ("a", i) in self.construction:
+                continue
+            (cu, cv), r, a0, sweep = self.arc_geometry(i)
+            if r < 1e-9 or math.dist(self.points[a], self.points[b]) < 1e-9:
+                continue
+            m = (cu + r * math.cos(a0 + sweep / 2), cv + r * math.sin(a0 + sweep / 2), 0)
+            # through the end points exactly, so the arc meets lines that end there
+            edges.append(Edge.make_three_point_arc((*self.points[a], 0), m, (*self.points[b], 0)))
         return edges
 
     def regions(self) -> list["Region"]:
         """The smallest areas the sketch's curves enclose. Curves split each other where they cross, so
         overlapping shapes give one region per piece; open ends that enclose nothing are ignored."""
-        key = (tuple(map(tuple, self.points)), tuple(self.lines), tuple(self.circles))
+        key = (tuple(map(tuple, self.points)), tuple(self.lines), tuple(self.circles), tuple(self.arcs),
+               frozenset(self.construction))
         if self._region_cache is None or self._region_cache[0] != key:
             self._region_cache = (key, _arrangement(self._curves()), {})
         return self._region_cache[1]
@@ -343,7 +412,8 @@ class Sketch:
     # -- persistence
     def to_dict(self) -> dict:
         return {"plane": asdict(self.plane), "points": [list(p) for p in self.points], "lines": [list(l) for l in self.lines],
-                "circles": [list(c) for c in self.circles],
+                "circles": [list(c) for c in self.circles], "arcs": [list(a) for a in self.arcs],
+                "construction": sorted([k, i] for k, i in self.construction),
                 "constraints": [asdict(c) for c in self.constraints], "selection": [list(p) for p in self.selection],
                 "version": self.version}
 
@@ -354,6 +424,8 @@ class Sketch:
         sk.points = [list(p) for p in d["points"]]
         sk.lines = [tuple(l) for l in d["lines"]]
         sk.circles = [tuple(c) for c in d["circles"]]
+        sk.arcs = [tuple(a) for a in d.get("arcs", [])]
+        sk.construction = {(k, i) for k, i in d.get("construction", [])}
         sk.constraints = [Constraint(**c) for c in d["constraints"]]
         sk.selection = [tuple(p) for p in d.get("selection", [])]
         sk.version = d.get("version", 0)

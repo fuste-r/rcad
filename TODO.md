@@ -14,11 +14,13 @@
 
 - [x] Unify direct manipulation for extrude, push/pull, fillet, and chamfer with live previews and precise numeric entry; reduce the split between drag interactions and dialogs.
 - [x] Add smart snapping and optional auto-constraints for endpoints, midpoints, centers, and alignments.
-- [ ] Snap to tangency (needs the tangent constraint and arcs).
+- [ ] Snap to tangency: offer a tangent arc start or line end while drawing (the tangent constraint and arcs exist now).
 - [ ] Make displayed sketch dimensions editable on-canvas and open the corresponding constraint editor when selected.
 - [x] Offer context-aware actions based on the current selection, and add direct drag editing for chamfer to complement the existing fillet interaction.
-- [ ] Add sketch arcs, trim/split/offset tools, construction geometry, and projected model edges. Support closed profiles that combine lines, arcs, and circles.
-- [ ] Add common sketch constraints such as angle, radius, tangent, and concentric, with solver status and expression support where applicable.
+- [x] Add sketch arcs and construction geometry. Support closed profiles that combine lines, arcs, and circles.
+- [ ] Add trim/split/offset tools and projected model edges.
+- [x] Add radius, tangent (line–arc and arc–arc), and concentric sketch constraints.
+- [ ] Add an angle constraint, equal radius, and expression support for dimensions other than distance.
 
 ## P1: Feel and flow (ideas from superGeometry.app)
 
@@ -28,7 +30,7 @@ Interaction ideas taken from superGeometry.app's README (Nov 2026). Several of t
 - [ ] Replace feature dialogs with a tool bar that becomes the active tool's settings: values you can tap and type or drag, option words to toggle, a tick to finish and a cross to cancel.
 - [x] Quick buttons beside the current selection: its two likeliest next tools (flat face → Sketch, Push/Pull; edge → Fillet, Chamfer; body → Move, Mirror), then Delete and More. Show only the tools that apply to the selection.
 - [ ] Hover previews: with the pointer over a tool button, draw a dashed preview of what it would do to the current selection before the tool starts.
-- [x] Sketch regions: overlapping closed shapes split into separately selectable regions. Clicking a region shows the extrude arrow right away, the region itself can be dragged, more regions can be added while the distance is still 0, and construction geometry never makes regions (once construction geometry exists, leave it out of `Sketch._curves`).
+- [x] Sketch regions: overlapping closed shapes split into separately selectable regions. Clicking a region shows the extrude arrow right away, the region itself can be dragged, more regions can be added while the distance is still 0, and construction geometry never makes regions (`Sketch._curves` leaves construction geometry out).
 - [ ] Auto extrude operation: decide new body, add, or cut from the drag direction (on a plane, up is a new body and down is a cut; on a face, out adds and in cuts), with an explicit override. Start at the last-used distance.
 - [x] Right-click steps back: first a half-finished entity or pick, then the active tool, then out of the sketch. With something selected, right-click opens its tools at the pointer.
 - [x] Selection shortcuts: double-click selects the whole body, Ctrl+A selects everything, drag a box on empty space to select several, and a tag names what is picked.

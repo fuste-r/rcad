@@ -113,14 +113,14 @@ def _sketch_with_rect_and_circle(monkeypatch):
 
 
 @pytest.mark.parametrize("selection, labels, more", [
-    ({("l", 0)}, ["Distance", "Horizontal", "🗑", "⋯"], ["Vertical"]),
-    ({("l", 0), ("l", 1)}, ["Parallel", "Perpendicular", "🗑", "⋯"], ["Equal", "Spacing"]),
+    ({("l", 0)}, ["Distance", "Horizontal", "🗑", "⋯"], ["Vertical", "┄ Construction"]),
+    ({("l", 0), ("l", 1)}, ["Parallel", "Perpendicular", "🗑", "⋯"], ["Equal", "Spacing", "┄ Construction"]),
     ({("p", 0), ("p", 2)}, ["Coincident", "Distance", "🗑", "⋯"],
      ["Horizontal", "Vertical", "Expression", "Fixed"]),
-    ({("p", 0), ("l", 1)}, ["Point on line", "🗑"], None),
-    ({("c", 0)}, ["Diameter", "🗑"], None),
-    ({("p", 0)}, ["Fixed", "🗑"], None),
-    ({("c", 0), ("l", 0)}, ["🗑"], None),  # nothing fits: still deletable
+    ({("p", 0), ("l", 1)}, ["Point on line", "🗑", "⋯"], ["┄ Construction"]),
+    ({("c", 0)}, ["Diameter", "🗑", "⋯"], ["┄ Construction"]),
+    ({("p", 0)}, ["Fixed", "🗑"], None),  # points alone can't be construction geometry
+    ({("c", 0), ("l", 0)}, ["🗑", "⋯"], ["┄ Construction"]),  # no constraint fits: still deletable
 ])
 def test_sketch_selection_offers_fitting_constraints(qapp, monkeypatch, selection, labels, more):
     w = _sketch_with_rect_and_circle(monkeypatch)

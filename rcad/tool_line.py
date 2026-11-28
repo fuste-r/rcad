@@ -105,6 +105,12 @@ class ToolLine(QFrame):
         self.adjustSize()
         self.move(max((p.width() - self.width()) // 2, 0), max(p.height() - self.height() - 14, 0))
 
+    def event(self, e: QEvent) -> bool:
+        handled = super().event(e)
+        if e.type() == QEvent.LayoutRequest and not self.isHidden():
+            self._place()  # a button's label changed size (e.g. "Draw: Select"): fit around it again
+        return handled
+
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
         if event.type() == QEvent.Resize and not self.isHidden():
             self._place()

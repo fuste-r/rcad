@@ -2,7 +2,7 @@
 
 A small parametric 3D CAD app for Linux, built on [build123d](https://github.com/gumyr/build123d) (OpenCascade), [SolveSpace](https://solvespace.com/)'s `libslvs` constraint solver, and PySide6.
 
-- Sketch on the XY/XZ/YZ planes or on any planar face (line, rectangle, circle)
+- Sketch on the XY/XZ/YZ planes or on any planar face (line, rectangle, circle, arc), with construction geometry for reference
 - Curves split each other where they cross: overlapping shapes and lines drawn across a shape make separate regions, each of which can be picked, extruded, or revolved on its own
 - Geometric and dimensional constraints solved by libslvs
 - Extrude, revolve, sweep, and loft (add or cut), face push/pull, fillet, chamfer
@@ -56,6 +56,8 @@ On Wayland with NVIDIA, if the OpenGL context fails to create, try `QT_QPA_PLATF
 | Fillet or chamfer an edge | drag the edge across itself: toward the body (push) rounds it, away from the body (pull) bevels it; you can switch direction mid-drag. Dragging a fillet's rounded edge resizes it, and pulling it turns it into a chamfer. If the body side can't be seen (the edge faces you), dragging up the screen counts as a pull |
 | Exact size while dragging a face or edge | type a value (units, maths and variables work: `2in + 5mm`, `wall * 2`), then Enter or click; Esc cancels |
 | Change the size just made | click the value box left on the model and type, or drag it sideways to scrub (Shift: fine, Ctrl: coarse) |
+| Draw an arc | ◠ Arc: click the centre, then the start (this sets the radius), then move round either way and click where it ends. Type R for the radius before the start, ∠ for the angle it sweeps (negative: clockwise) before the end. Tangent, Radius and Concentric are in Constrain; a line and an arc (or two arcs) can be tangent where they share an end |
+| Construction geometry | select lines, circles or arcs and press Q (or Modify ▾ → Construction): they turn dashed and still work for snapping and constraints, but never make regions. Q again makes them normal |
 | Snapping while drawing | points snap to existing points, line midpoints, lines and circles, and to being level with or straight above another point (or the line's start), shown by a marker, dashed guides, and the status bar. The snap becomes a constraint (coincident, midpoint, point on line or circle, horizontal/vertical), so the shape stays attached when the sketch changes. Otherwise points land on the grid, whose step is the Snap value scaled up (×2, ×5, ×10, …) when zoomed out. Hold Ctrl to place a point on the grid only, with no snapping or constraints |
 | Exact size while drawing a line, rectangle, or circle | after the first click, type a size; Tab / Shift+Tab move between sizes (length and angle, width and height, diameter); Enter or a click places it. The sizes stay on the new shape (or on a line chain's last segment after Esc): retype or scrub them to resize it, click elsewhere to put them away |
 
