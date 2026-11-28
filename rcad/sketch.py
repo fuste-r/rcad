@@ -5,7 +5,12 @@ import math
 from dataclasses import asdict, dataclass, field
 
 import numpy as np
-from build123d import Face, Plane, Shape, Solid, Vector, Wire
+from build123d import Compound, Edge, Face, Plane, Shape, Solid, Vector
+from build123d.topology.shape_core import List_TopoDS_Shape
+from OCP.BRepAlgoAPI import BRepAlgoAPI_Splitter
+from OCP.BRepClass import BRepClass_FaceClassifier
+from OCP.gp import gp_Pnt
+from OCP.TopAbs import TopAbs_IN, TopAbs_INTERNAL
 from py_slvs import slvs
 
 from .units import MM, Unit
@@ -113,6 +118,7 @@ class Sketch:
     status: str = "unsolved"
     dof: int = -1
     version: int = 0  # incremented on edit to enable shape caching
+    _region_cache: tuple | None = field(default=None, init=False, repr=False, compare=False)
 
     # -- editing
     def add_point(self, u: float, v: float) -> int:
@@ -242,56 +248,33 @@ class Sketch:
         return True
 
     # -- profiles
-    def loops(self) -> list[tuple[str, object]]:
-        """Closed profiles: ('poly', [(u,v)...]) or ('circle', (cu, cv, r))."""
-        out: list[tuple[str, object]] = [("circle", (*self.points[c], r)) for c, r in self.circles if r > 1e-9]
-        at: dict[int, list[int]] = {}
-        for li, (a, b) in enumerate(self.lines):
-            at.setdefault(a, []).append(li)
-            at.setdefault(b, []).append(li)
-        used: set[int] = set()
-        for start in range(len(self.lines)):
-            if start in used:
-                continue
-            a, b = self.lines[start]
-            first, cur = a, b
-            ok = True
-            seq = [start]
-            verts = [a, b]
-            while cur != first:
-                nxt = [x for x in at[cur] if x != seq[-1]]
-                if len(at[cur]) != 2 or len(nxt) != 1 or nxt[0] in seq:
-                    ok = False
-                    break
-                seq.append(nxt[0])
-                p, q = self.lines[nxt[0]]
-                cur = q if p == cur else p
-                verts.append(cur)
-            if ok and len(seq) >= 3:
-                used.update(seq)
-                out.append(("poly", [tuple(self.points[v]) for v in verts[:-1]]))
-        return out
+    def _curves(self) -> list:
+        """The sketch's lines and circles as edges on the local plane (z = 0)."""
+        edges = []
+        for a, b in self.lines:
+            (u0, v0), (u1, v1) = self.points[a], self.points[b]
+            if math.hypot(u1 - u0, v1 - v0) > 1e-9:
+                edges.append(Edge.make_line((u0, v0, 0), (u1, v1, 0)))
+        for c, r in self.circles:
+            if r > 1e-9:
+                u, v = self.points[c]
+                edges.append(Edge.make_circle(r, Plane(origin=(u, v, 0))))
+        return edges
 
-    def regions(self) -> list[tuple[tuple, list[tuple]]]:
-        """Fillable areas as (outer loop, hole loops): even-depth loops with their direct children as holes."""
-        loops = self.loops()
-        areas = [_area(l) for l in loops]
-        containers = [[j for j, o in enumerate(loops) if j != i and areas[j] > areas[i] and _inside(l, o)]
-                      for i, l in enumerate(loops)]
-        parent = [min(c, key=lambda j: areas[j]) if c else None for c in containers]
-        return [(loops[i], [loops[j] for j in range(len(loops)) if parent[j] == i])
-                for i in range(len(loops)) if len(containers[i]) % 2 == 0]
+    def regions(self) -> list["Region"]:
+        """The smallest areas the sketch's curves enclose. Curves split each other where they cross, so
+        overlapping shapes give one region per piece; open ends that enclose nothing are ignored."""
+        key = (tuple(map(tuple, self.points)), tuple(self.lines), tuple(self.circles))
+        if self._region_cache is None or self._region_cache[0] != key:
+            self._region_cache = (key, _arrangement(self._curves()), {})
+        return self._region_cache[1]
 
     def region_at(self, u: float, v: float) -> int | None:
-        """Index into regions() of the filled area under (u, v); None over empty space or holes."""
-        regs = self.regions()
-        best, best_area = None, math.inf
-        for i, (outer, holes) in enumerate(regs):
-            if _contains(outer, (u, v)) and not any(_contains(h, (u, v)) for h in holes):
-                a = _area(outer)
-                if a < best_area:
-                    best, best_area = i, a
-        return best
+        """Index into regions() of the region under (u, v); None over empty space."""
+        for i, r in enumerate(self.regions()):
+            if r.contains(u, v):
+                return i
+        return None
 
     def selected_regions(self) -> set[int]:
         return {i for p in self.selection if (i := self.region_at(*p)) is not None}
@@ -307,31 +290,47 @@ class Sketch:
         else:
             self.selection = (self.selection if additive else []) + [(u, v)]
 
-    def _region_face(self, region) -> Face:
-        outer, holes = region
-        return Face(_loop_wire(outer), [_loop_wire(h) for h in holes])
+    def filled_regions(self) -> list[int]:
+        """The regions used when none are picked: each separate outline flips between solid and hole,
+        so a circle inside a rectangle is a hole, an island inside that is solid again, and shapes
+        that overlap or are divided by lines are solid throughout."""
+        regs = self.regions()
+        cache = self._region_cache[2]
+        if "filled" not in cache:
+            groups = _outline_groups(regs)
+            envelopes = [Face(_fuse([regs[i].face for i in g])[0].outer_wire()) for g in groups]
+            cache["filled"] = [i for i, r in enumerate(regs)
+                               if sum(_face_contains(env, *r.sample) for env in envelopes) % 2 == 1]
+        return cache["filled"]
+
+    def profile_faces(self, profiles: list | None = None) -> list[Face]:
+        """Faces on the local plane for the regions under `profiles` (points in the sketch), or the
+        filled regions when None. Neighbouring regions merge into one face."""
+        regs = self.regions()
+        if profiles is None:
+            keep = self.filled_regions()
+        else:
+            keep = sorted({i for p in profiles if (i := self.region_at(*p)) is not None})
+        return _fuse([regs[i].face for i in keep])
 
     def region_triangles(self, index: int) -> np.ndarray:
         """World-space triangles (N,3,3) filling region `index`, for highlighting."""
-        face = self.plane.b123d().from_local_coords(self._region_face(self.regions()[index]))
-        verts, tris = face.tessellate(0.05)
-        v = np.array([[p.X, p.Y, p.Z] for p in verts], dtype=float)
-        return v[np.array(tris, dtype=int)].reshape(-1, 3, 3)
+        local = self.regions()[index].triangles
+        pl = self.plane
+        o, x, y = np.array(pl.origin, float), np.array(pl.xdir, float), np.array(pl.ydir, float)
+        return o + local[..., :1] * x + local[..., 1:2] * y
 
     def solid(self, distance: float, profiles: list | None = None) -> Shape | None:
         """Extrude filled regions along the plane normal; `profiles` (points in the sketch) limits which ones."""
-        regs = self.regions()
-        if profiles is not None:
-            keep = {i for p in profiles if (i := self.region_at(*p)) is not None}
-            regs = [r for i, r in enumerate(regs) if i in keep]
-        if not regs or abs(distance) < 1e-9:
+        faces = self.profile_faces(profiles)
+        if not faces or abs(distance) < 1e-9:
             return None
         pl = self.plane.b123d()
         n = self.plane.normal
         d = Vector(float(n[0] * distance), float(n[1] * distance), float(n[2] * distance))
         result = None
-        for region in regs:
-            solid = Solid.extrude(pl.from_local_coords(self._region_face(region)), d)
+        for face in faces:
+            solid = Solid.extrude(pl.from_local_coords(face), d)
             result = solid if result is None else result.fuse(solid)
         return result
 
@@ -355,36 +354,87 @@ class Sketch:
         return sk
 
 
-def _area(loop) -> float:
-    if loop[0] == "circle":
-        return math.pi * loop[1][2] ** 2
-    p = loop[1]
-    return abs(sum(p[i][0] * p[(i + 1) % len(p)][1] - p[(i + 1) % len(p)][0] * p[i][1] for i in range(len(p)))) / 2
+
+@dataclass(eq=False)
+class Region:
+    """One enclosed area of a sketch, on the local plane (u, v, 0)."""
+    face: Face
+    sample: tuple[float, float]  # a point well inside it
+    triangles: np.ndarray  # (N, 3, 3) local triangles, for highlighting
+
+    def contains(self, u: float, v: float) -> bool:
+        return _face_contains(self.face, u, v)
 
 
-def _probe(loop):
-    return (loop[1][0] + loop[1][2], loop[1][1]) if loop[0] == "circle" else loop[1][0]
+def _face_contains(face: Face, u: float, v: float) -> bool:
+    c = BRepClass_FaceClassifier(face.wrapped, gp_Pnt(u, v, 0), 1e-7)
+    return c.State() == TopAbs_IN
 
 
-def _inside(loop, outer) -> bool:
-    return _contains(outer, _probe(loop))
+def _arrangement(edges: list) -> list[Region]:
+    """Split a big face by every curve and keep the pieces that do not reach its border."""
+    if not edges:
+        return []
+    bb = Compound(edges).bounding_box()
+    size = 4 * max(bb.size.X, bb.size.Y, 1.0)
+    cx, cy = (bb.min.X + bb.max.X) / 2, (bb.min.Y + bb.max.Y) / 2
+    big = Face.make_rect(size, size, Plane(origin=(cx, cy, 0)))
+    args, tools = List_TopoDS_Shape(), List_TopoDS_Shape()
+    args.Append(big.wrapped)
+    for e in edges:
+        tools.Append(e.wrapped)
+    splitter = BRepAlgoAPI_Splitter()
+    splitter.SetArguments(args)
+    splitter.SetTools(tools)
+    splitter.SetFuzzyValue(1e-7)
+    splitter.Build()
+    if not splitter.IsDone():
+        return []
+    border = size / 2 * 0.999
+    regions = []
+    for f in Compound(splitter.Shape()).faces():
+        fb = f.bounding_box()
+        if max(abs(fb.min.X - cx), abs(fb.max.X - cx), abs(fb.min.Y - cy), abs(fb.max.Y - cy)) > border:
+            continue  # the outside
+        # open curves poking into the region come back as internal edges: drop them
+        holes = [w for w in f.inner_wires() if any(e.wrapped.Orientation() != TopAbs_INTERNAL for e in w.edges())]
+        face = Face(f.outer_wire(), holes)
+        if face.area < 1e-9:
+            continue
+        verts, tris = face.tessellate(0.05)
+        v = np.array([[p.X, p.Y, p.Z] for p in verts], dtype=float)
+        tri = v[np.array(tris, dtype=int)].reshape(-1, 3, 3)
+        ab, ac = tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0]
+        big_tri = tri[int(np.argmax(np.abs(ab[:, 0] * ac[:, 1] - ab[:, 1] * ac[:, 0])))]
+        cu, cv = big_tri[:, :2].mean(axis=0)
+        regions.append(Region(face, (float(cu), float(cv)), tri))
+    return regions
 
 
-def _contains(outer, pt) -> bool:
-    x, y = pt
-    if outer[0] == "circle":
-        u, v, r = outer[1]
-        return math.hypot(x - u, y - v) < r
-    p, inside = outer[1], False
-    for i in range(len(p)):
-        (x1, y1), (x2, y2) = p[i], p[(i + 1) % len(p)]
-        if (y1 > y) != (y2 > y) and x < (x2 - x1) * (y - y1) / (y2 - y1) + x1:
-            inside = not inside
-    return inside
+def _outline_groups(regs: list[Region]) -> list[list[int]]:
+    """Regions whose outer boundaries share an edge, grouped: each group is one separate outline."""
+    parent = list(range(len(regs)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    owner: dict = {}
+    for i, r in enumerate(regs):
+        for e in r.face.outer_wire().edges():
+            j = owner.setdefault(hash(e), i)
+            parent[find(i)] = find(j)
+    groups: dict[int, list[int]] = {}
+    for i in range(len(regs)):
+        groups.setdefault(find(i), []).append(i)
+    return list(groups.values())
 
 
-def _loop_wire(loop) -> Wire:
-    if loop[0] == "circle":
-        u, v, r = loop[1]
-        return Wire.make_circle(r, Plane(origin=(u, v, 0)))
-    return Wire.make_polygon([Vector(float(u), float(v), 0.0) for u, v in loop[1]])
+def _fuse(faces: list[Face]) -> list[Face]:
+    """Merge faces that touch into single faces without seams."""
+    if len(faces) <= 1:
+        return list(faces)
+    merged = faces[0].fuse(*faces[1:]).clean()
+    return merged.faces()

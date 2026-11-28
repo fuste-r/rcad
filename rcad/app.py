@@ -204,6 +204,8 @@ class MainWindow(QMainWindow):
         self.view.hovered.connect(self.on_hover)
         self.view.scrolled.connect(self.on_wheel_adjust)
         self.view.extrude_commit.connect(self.on_extrude_commit)
+        self.view.region_extrude.connect(self.on_region_extrude)
+        self.view.region_drag = self._region_drag_target
         self.view.fillet_commit.connect(self.on_fillet_commit)
         self.view.fillet_preview.connect(self.on_fillet_preview)
         self.view.fillet_cancel.connect(self.on_fillet_cancel)
@@ -910,6 +912,7 @@ class MainWindow(QMainWindow):
     def _update_regions(self):
         """Refresh the fill for selected and hovered sketch regions (hover_region = (feature index, region))."""
         fills = []
+        arrow = None
         for i, f in enumerate(self.doc.features):
             if f.kind != "sketch":
                 continue
@@ -921,9 +924,12 @@ class MainWindow(QMainWindow):
             fills += [(t, (1.0, 0.55, 0.15, 0.45)) for t in chosen_fills]
             if i == self.region_sketch and chosen_fills:
                 self._region_anchor = chosen_fills[0].reshape(-1, 3).mean(axis=0)
+                if self.mode == "model":
+                    arrow = (np.concatenate(chosen_fills).reshape(-1, 3).mean(axis=0), np.array(f.sketch.plane.normal, float))
             if self.hover_region is not None and self.hover_region[0] == i and self.hover_region[1] not in chosen:
                 fills.append((f.sketch.region_triangles(self.hover_region[1]), (0.95, 0.9, 0.3, 0.35)))
         self.view.region_fill = fills
+        self.view.region_arrow = arrow
         self._refresh_quick()
         self._refresh_tag()
         self.view.update()
@@ -1059,6 +1065,80 @@ class MainWindow(QMainWindow):
         self._clear_sketch_history()
         self.rebuild()
 
+    def _picking_regions_of(self, i: int) -> bool:
+        """Only regions of sketch i are picked: a plain click on another of its regions adds it."""
+        v, feats = self.view, self.doc.features
+        geometry = v.sketch_sel if self.mode == "sketch" else (v.sel_faces or v.sel_edges)
+        return (not geometry and i == self.region_sketch and 0 <= i < len(feats)
+                and feats[i].kind == "sketch" and bool(feats[i].sketch.selected_regions()))
+
+    def _region_drag_target(self, x, y, on_arrow: bool):
+        """What a left drag from (x, y) extrudes: the picked regions when it starts on one of them or
+        on their arrow, else the region under the pointer (added to the picked ones of its sketch)."""
+        feats = self.doc.features
+        if self.mode != "model" or self._session is not None:
+            return None
+        if on_arrow:
+            i = self.region_sketch
+            if not (0 <= i < len(feats) and feats[i].kind == "sketch"):
+                return None
+            points = list(feats[i].sketch.selection)
+        else:
+            if self.view.sel_faces and self.view.pick_face(x, y) in self.view.sel_faces:
+                return None  # a picked face drags as push/pull
+            hit = self._pick_region(x, y)
+            if hit is None:
+                return None
+            i, r, uv = hit
+            sk = feats[i].sketch
+            if self._picking_regions_of(i) or (i == self.region_sketch and r in sk.selected_regions()):
+                points = list(sk.selection) + ([] if r in sk.selected_regions() else [tuple(uv)])
+            else:
+                points = [tuple(uv)]
+        sk = feats[i].sketch
+        by_region = {}
+        for p in points:
+            r = sk.region_at(*p)
+            if r is not None:
+                by_region.setdefault(r, [float(p[0]), float(p[1])])
+        if not by_region:
+            return None
+        profiles = list(by_region.values())
+        pl = sk.plane
+        segments, corners = [], []
+        for face in sk.profile_faces(profiles):
+            for e in face.edges():
+                n = 2 if e.geom_type.name == "LINE" else 48
+                pts = [pl.to3d(q.X, q.Y) for q in (e.position_at(t) for t in np.linspace(0, 1, n))]
+                segments += list(zip(pts[:-1], pts[1:]))
+            corners += [pl.to3d(q.X, q.Y) for q in face.vertices()]
+        tris = np.concatenate([sk.region_triangles(r) for r in by_region]).reshape(-1, 3)
+        return {"sketch": i, "profiles": profiles, "center": tris.mean(axis=0),
+                "normal": np.array(pl.normal, float), "segments": segments,
+                "corners": corners}
+
+    def on_region_extrude(self, dist: float, target: dict):
+        """A sketch region was dragged: extrude the regions it carried by the dragged distance."""
+        self._value_feature = None
+        if abs(dist) < 0.01:
+            self.view.dismiss_value_box()
+            return
+        self._settle_session()
+        i = target["sketch"]
+        feats = self.doc.features
+        if not (0 <= i < len(feats) and feats[i].kind == "sketch"):
+            self.view.dismiss_value_box()
+            return
+        feature = Feature("extrude", sketch_ref=i, value=float(dist), auto=True,
+                          profiles=[list(p) for p in target["profiles"]])
+        if self.commit(feature):
+            self._value_feature = feature
+            self._last_extrude = float(dist)
+            feats[i].sketch.selection = []  # the regions are inside the new body now
+            self._update_regions()
+        else:
+            self.view.dismiss_value_box()
+
     def _pick_region(self, x, y):
         """Visible-sketch region under the cursor and not hidden behind a model face: (feature, region, (u, v))."""
         cam, w, h = self.view.camera, self.view.width(), self.view.height()
@@ -1109,7 +1189,7 @@ class MainWindow(QMainWindow):
                 if not multi:
                     sel.clear()
                 if uv is not None:
-                    sk.toggle_region(uv[0], uv[1], multi)
+                    sk.toggle_region(uv[0], uv[1], multi or self._picking_regions_of(self.sketch_index))
                     self.region_sketch = self.sketch_index
                     self.mark_dirty()
             elif multi:
@@ -1599,6 +1679,7 @@ class MainWindow(QMainWindow):
         edge = v.pick_edge(x, y)
         hit = None if edge is not None else self._pick_region(x, y)
         face = None if edge is not None or hit is not None else v.pick_face(x, y)
+        adding = hit is not None and self._picking_regions_of(hit[0])  # more regions for the same extrude
         if not multi:
             v.sel_faces.clear()
             v.sel_edges.clear()
@@ -1609,7 +1690,7 @@ class MainWindow(QMainWindow):
             v.sel_edges.symmetric_difference_update({edge})
         elif hit is not None:
             i, _, uv = hit
-            self.doc.features[i].sketch.toggle_region(uv[0], uv[1], multi)
+            self.doc.features[i].sketch.toggle_region(uv[0], uv[1], multi or adding)
             self.region_sketch = i
             self.mark_dirty()
         elif face is not None:
@@ -1954,7 +2035,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "⇈", "Create a sketch with a closed profile first.")
             return
         sk = self.doc.features[i].sketch
-        if len(sk.regions()) > 1 and not sk.selected_regions():
+        if len(sk.profile_faces()) > 1 and not sk.selected_regions():
             self.enter_sketch(i)
             self.statusBar().showMessage("Click the regions to extrude (Ctrl+click for several), then press Extrude. "
                                          "With nothing highlighted, every region is extruded.", 15000)
@@ -2196,7 +2277,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Revolve", "Create a sketch with a closed profile first.")
             return
         sketch = self.doc.features[i].sketch
-        if len(sketch.regions()) > 1 and not sketch.selected_regions():
+        if len(sketch.profile_faces()) > 1 and not sketch.selected_regions():
             self.enter_sketch(i)
             self.statusBar().showMessage("Click the regions to revolve (Ctrl+click for several), then finish the sketch.",
                                          12000)
@@ -2212,7 +2293,8 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Sweep", "Create a sketch with one closed profile first.")
             return
         profile = self.doc.features[profile_ref].sketch
-        if len(profile.regions()) != 1:
+        picked = [list(p) for p in profile.selection] or None
+        if len(profile.profile_faces(picked)) != 1:
             QMessageBox.information(self, "Sweep", "Sweep currently requires exactly one closed profile region.")
             return
         paths = [(i, f"{i}: {f.name}") for i, f in enumerate(self.doc.features)
@@ -2222,11 +2304,12 @@ class MainWindow(QMainWindow):
             return
         dialog = SweepDialog(self, paths)
         if dialog.exec():
-            self.commit(Feature("sweep", sketch_ref=profile_ref, path_ref=dialog.path_ref, cut=dialog.cut))
+            self.commit(Feature("sweep", sketch_ref=profile_ref, path_ref=dialog.path_ref, cut=dialog.cut,
+                                profiles=picked))
 
     def loft(self):
         sections = [(i, f"{i}: {f.name}") for i, f in enumerate(self.doc.features)
-                    if f.kind == "sketch" and len(f.sketch.regions()) == 1]
+                    if f.kind == "sketch" and len(f.sketch.profile_faces()) == 1]
         if len(sections) < 2:
             QMessageBox.information(self, "Loft", "Create at least two sketches with one closed profile each.")
             return
@@ -2264,8 +2347,8 @@ class MainWindow(QMainWindow):
     def on_value_edit(self, kind: str, value: float):
         """A size typed into the value box left on the model after a drag."""
         f = self._value_feature
-        expected = {"extrude": "pushpull", "fillet": "fillet", "chamfer": "chamfer"}.get(kind)
-        if f is None or f.kind != expected or not any(x is f for x in self.doc.features):
+        expected = {"extrude": ("pushpull", "extrude"), "fillet": ("fillet",), "chamfer": ("chamfer",)}.get(kind, ())
+        if f is None or f.kind not in expected or not any(x is f for x in self.doc.features):
             self._value_feature = None  # gone (undo, delete, reload): nothing to edit
             self.view.dismiss_value_box()
             return
@@ -2302,8 +2385,8 @@ class MainWindow(QMainWindow):
     def on_value_scrub(self, kind: str, value: float):
         """Live size while the value box left after a drag is scrubbed; on_value_edit finishes it."""
         f = self._value_feature
-        expected = {"extrude": "pushpull", "fillet": "fillet", "chamfer": "chamfer"}.get(kind)
-        if f is None or f.kind != expected or not any(x is f for x in self.doc.features):
+        expected = {"extrude": ("pushpull", "extrude"), "fillet": ("fillet",), "chamfer": ("chamfer",)}.get(kind, ())
+        if f is None or f.kind not in expected or not any(x is f for x in self.doc.features):
             return
         if (kind in ("fillet", "chamfer") and value <= 1e-4) or abs(value) < 0.01:
             return
@@ -2648,7 +2731,7 @@ class MainWindow(QMainWindow):
             return
         elif f.kind == "loft":
             sections = [(j, f"{j}: {g.name}") for j, g in enumerate(self.doc.features)
-                        if g.kind == "sketch" and len(g.sketch.regions()) == 1]
+                        if g.kind == "sketch" and len(g.sketch.profile_faces()) == 1]
             dlg = LoftDialog(self, sections, f.section_refs, f.cut)
             if not dlg.exec():
                 return

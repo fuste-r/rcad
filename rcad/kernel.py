@@ -339,23 +339,20 @@ class Document:
                 raise ValueError("revolve angle must be between 0 and 360 degrees")
             direction = sketch.plane.xdir if f.axis == "u" else sketch.plane.ydir
             axis = Axis(sketch.plane.origin, direction)
-            regions = sketch.regions()
-            if f.profiles is not None:
-                selected = {i for p in f.profiles if (i := sketch.region_at(*p)) is not None}
-                regions = [region for i, region in enumerate(regions) if i in selected]
-            if not regions:
+            faces = sketch.profile_faces(f.profiles)
+            if not faces:
                 raise ValueError("sketch has no matching closed region")
             solid = None
-            for region in regions:
-                face = sketch.plane.b123d().from_local_coords(sketch._region_face(region))
+            for face in faces:
+                face = sketch.plane.b123d().from_local_coords(face)
                 revolved = Solid.revolve(face, f.value, axis)
                 solid = revolved if solid is None else solid.fuse(revolved).clean()
             return self._combine(part, solid, f.cut)
         if f.kind == "sweep":
             profile_sketch = self._sketch_for_feature(f.sketch_ref, "sweep profile")
             path_sketch = self._sketch_for_feature(f.path_ref, "sweep path")
-            profile_regions = self._selected_regions(profile_sketch, f.profiles)
-            if len(profile_regions) != 1:
+            profile_faces = profile_sketch.profile_faces(f.profiles)
+            if len(profile_faces) != 1:
                 raise ValueError("sweep requires exactly one closed profile region")
             paths = [Edge.make_line(path_sketch.plane.to3d(*path_sketch.points[a]),
                                     path_sketch.plane.to3d(*path_sketch.points[b]))
@@ -363,8 +360,7 @@ class Document:
             wires = Wire.combine(paths)
             if len(wires) != 1 or not wires[0].is_valid:
                 raise ValueError("sweep path must be one connected set of sketch lines")
-            face = profile_sketch.plane.b123d().from_local_coords(
-                profile_sketch._region_face(profile_regions[0]))
+            face = profile_sketch.plane.b123d().from_local_coords(profile_faces[0])
             solid = Solid.sweep(face, wires[0])
             return self._combine(part, solid, f.cut)
         if f.kind == "loft":
@@ -373,11 +369,10 @@ class Document:
             section_faces = []
             for ref in f.section_refs:
                 section_sketch = self._sketch_for_feature(ref, "loft section")
-                regions = section_sketch.regions()
-                if len(regions) != 1:
+                faces = section_sketch.profile_faces()
+                if len(faces) != 1:
                     raise ValueError("each loft section must contain exactly one closed profile")
-                section_faces.append(section_sketch.plane.b123d().from_local_coords(
-                    section_sketch._region_face(regions[0])))
+                section_faces.append(section_sketch.plane.b123d().from_local_coords(faces[0]))
             solid = loft(section_faces)
             return self._combine(part, solid, f.cut)
         if f.kind == "pushpull":
@@ -485,14 +480,6 @@ class Document:
         sketch = self.features[index].sketch
         sketch.variables = self.variables
         return sketch
-
-    @staticmethod
-    def _selected_regions(sketch: Sketch, profiles: list | None):
-        regions = sketch.regions()
-        if profiles is not None:
-            selected = {i for point in profiles if (i := sketch.region_at(*point)) is not None}
-            regions = [region for i, region in enumerate(regions) if i in selected]
-        return regions
 
     @staticmethod
     def _combine(part, solid, cut):

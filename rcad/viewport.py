@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from OpenGL import GL
 from PySide6.QtCore import QRect, QRectF, QSize, Qt, Signal
@@ -25,6 +27,7 @@ class Viewport(QOpenGLWidget):
     hovered = Signal(float, float)
     scrolled = Signal(float, float, int, object)  # x, y, angle delta, Qt.KeyboardModifier
     extrude_commit = Signal(float, tuple, tuple)  # distance_mm, center, normal
+    region_extrude = Signal(float, object)  # distance_mm, the target region_drag returned
     sketch_mouse = Signal(str, float, float)  # phase ("press"|"move"|"release"), x, y
     fillet_commit = Signal(float, list, str)  # size_mm, [edge midpoints], "fillet" (push) | "chamfer" (pull)
     fillet_preview = Signal(float, list, str)  # live size_mm, [edge midpoints], kind
@@ -67,7 +70,11 @@ class Viewport(QOpenGLWidget):
         self._norms = np.zeros((0, 3), np.float32)
         self._segs = np.zeros((0, 2, 3))
         self._seg_edge = np.zeros(0, int)
-        self._extrude_state = None  # {"face", "center", "normal", "start_screen", "outline"}
+        self._extrude_state = None  # {"face", "center", "normal", "start_screen", "outline" | "segments", "region"?}
+        # region_drag(x, y, on_arrow) -> {"center", "normal", "segments", ...} for sketch regions a left
+        # drag from (x, y) would extrude, or None; set by the app
+        self.region_drag = None
+        self.region_arrow = None  # (center, normal): the extrude arrow on the picked sketch regions
         self._extrude_dist = 0.0
         self._fillet_state = None  # {"mids", "away", "start_screen", "radius", "kind", "dir"}
         # Value box: shows the dragged size; typing a number sets it. After the drag
@@ -256,6 +263,7 @@ class Viewport(QOpenGLWidget):
         self._draw_grid()
         self._draw_model()
         self._draw_extrude_preview()
+        self._draw_region_arrow()
         self._draw_sketch()
         self._draw_cube()
 
@@ -343,9 +351,10 @@ class Viewport(QOpenGLWidget):
 
     def _draw_extrude_preview(self):
         """Draw the drag-to-extrude preview: offset face outline + drag axis."""
-        if self._extrude_state is None or self.mesh is None:
+        st = self._extrude_state
+        if st is None or (self.mesh is None and "segments" not in st):
             return
-        c, n = self._extrude_state["center"], self._extrude_state["normal"]
+        c, n = st["center"], st["normal"]
         d = self._extrude_dist
         if abs(d) < 1e-6:
             return
@@ -375,17 +384,77 @@ class Viewport(QOpenGLWidget):
         GL.glVertex3f(*b2)
         GL.glEnd()
         # 3. Offset silhouette of the selected face (outline of the extruded top)
-        verts = self.mesh.verts
+        if "segments" in st:
+            segs = [(np.asarray(a, float), np.asarray(b, float)) for a, b in st["segments"]]
+        else:
+            verts = self.mesh.verts
+            segs = [(np.asarray(verts[a], float), np.asarray(verts[b], float)) for a, b in st["outline"]]
         GL.glLineWidth(2)
         GL.glColor3f(0.0, 0.9, 0.6)  # teal for preview
-        for a, b in self._extrude_state["outline"]:
-            pa = np.asarray(verts[a], float) + d * n
-            pb = np.asarray(verts[b], float) + d * n
-            GL.glBegin(GL.GL_LINES)
+        GL.glBegin(GL.GL_LINES)
+        for pa, pb in segs:
+            GL.glVertex3f(*(pa + d * n))
+            GL.glVertex3f(*(pb + d * n))
+        for pa in st.get("corners", []):  # a region grows a whole new body: show its sides too
+            pa = np.asarray(pa, float)
             GL.glVertex3f(*pa)
-            GL.glVertex3f(*pb)
-            GL.glEnd()
+            GL.glVertex3f(*(pa + d * n))
+        GL.glEnd()
         GL.glLineWidth(1)
+        GL.glEnable(GL.GL_LIGHTING)
+
+    def _px_per_world(self, point) -> float:
+        depth = max(1e-6, abs(float(np.dot(np.asarray(point, float) - self.camera.eye, self.camera.back))))
+        return self.height() / (2.0 * depth * FOV_TAN)
+
+    ARROW_PX = 72  # length of the region extrude arrow on screen
+
+    def _arrow_ends(self):
+        """World base and tip of the region extrude arrow, or None while it is hidden."""
+        if self.region_arrow is None or self._extrude_state is not None or self.sketch is not None:
+            return None
+        c, n = (np.asarray(v, float) for v in self.region_arrow)
+        return c, c + n * (self.ARROW_PX / self._px_per_world(c))
+
+    def on_region_arrow(self, x, y, px=8.0) -> bool:
+        ends = self._arrow_ends()
+        if ends is None:
+            return False
+        a, b = self.camera.project(np.array(ends), self.width(), self.height())
+        if np.isnan(a).any() or np.isnan(b).any():
+            return False
+        ab, ap = b - a, np.array([x, y], float) - a
+        t = float(np.clip(ap @ ab / max(ab @ ab, 1e-9), 0, 1))
+        return float(np.linalg.norm(ap - t * ab)) <= px
+
+    def _draw_region_arrow(self):
+        ends = self._arrow_ends()
+        if ends is None:
+            return
+        base, tip = ends
+        n = tip - base
+        length = float(np.linalg.norm(n))
+        n = n / length
+        side = np.cross(n, self.camera.back)
+        if np.linalg.norm(side) < 1e-6:
+            side = np.cross(n, self.camera.up)
+        side /= np.linalg.norm(side)
+        head = 0.28 * length
+        GL.glDisable(GL.GL_LIGHTING)
+        GL.glDisable(GL.GL_DEPTH_TEST)  # stays visible on top of the region it rises from
+        GL.glColor3f(1.0, 0.55, 0.15)
+        GL.glLineWidth(4)
+        GL.glBegin(GL.GL_LINES)
+        GL.glVertex3f(*base)
+        GL.glVertex3f(*(tip - n * head * 0.5))
+        GL.glEnd()
+        GL.glBegin(GL.GL_TRIANGLES)
+        GL.glVertex3f(*tip)
+        GL.glVertex3f(*(tip - n * head + side * head * 0.45))
+        GL.glVertex3f(*(tip - n * head - side * head * 0.45))
+        GL.glEnd()
+        GL.glLineWidth(1)
+        GL.glEnable(GL.GL_DEPTH_TEST)
         GL.glEnable(GL.GL_LIGHTING)
 
     def _draw_sketch_geometry(self, sk: Sketch, selected: set, base_color):
@@ -590,6 +659,27 @@ class Viewport(QOpenGLWidget):
                                            "start_screen": (p.x(), p.y()),
                                            "outline": self._face_outline(face)}
                     self._extrude_dist = 0.0
+        # Drag a sketch region (or its arrow) to extrude it
+        if (e.button() == Qt.LeftButton and not self._cube_press and self.sketch is None
+                and self._extrude_state is None and self.region_drag is not None
+                and not (e.modifiers() & (Qt.AltModifier | Qt.ShiftModifier | Qt.ControlModifier))):
+            on_arrow = self.on_region_arrow(p.x(), p.y())
+            target = None
+            if on_arrow or self.mesh is None or self.pick_edge(p.x(), p.y()) is None:
+                target = self.region_drag(p.x(), p.y(), on_arrow)
+            if target is not None:
+                c, n = np.asarray(target["center"], float), np.asarray(target["normal"], float)
+                axis = c  # the arrow's own line, or the line through the pressed point of the region
+                if not on_arrow:
+                    o, r = self.camera.ray(p.x(), p.y(), self.width(), self.height())
+                    hit = ray_plane(o, r, c, n)
+                    if hit is not None:
+                        axis = np.asarray(hit, float)
+                self._extrude_state = {"face": None, "center": c, "normal": n, "axis": axis,
+                                       "start_screen": (p.x(), p.y()), "segments": target["segments"],
+                                       "corners": target.get("corners", []), "region": target}
+                self._extrude_dist = 0.0
+                return
         # Drag-to-fillet: left drag (no modifier keys) on a picked/selected edge.
         # Takes priority over orbit, so a left drag on an edge fillets instead of rotating.
         if (e.button() == Qt.LeftButton and not self._cube_press and self.sketch is None
@@ -682,6 +772,12 @@ class Viewport(QOpenGLWidget):
                 depth = max(1.0, abs(float(np.dot(c - self.camera.eye, b))))
                 px_per_world = self.height() / (2.0 * depth * FOV_TAN)
                 self._extrude_dist = d_px / px_per_world
+                if self._extrude_state.get("region") is not None:
+                    # the arrow follows the pointer exactly: the nearest points of the axis and the pointer's ray
+                    a = self._extrude_state["axis"]
+                    t0, t1 = self._axis_param(a, n, *p0), self._axis_param(a, n, p.x(), p.y())
+                    if t0 is not None and t1 is not None:
+                        self._extrude_dist = t1 - t0
         elif self._fillet_state is not None:
             # Drag across the edge on screen: toward the body rounds it (fillet), away from
             # the body bevels it (chamfer). Movement along the edge doesn't count.
@@ -730,6 +826,18 @@ class Viewport(QOpenGLWidget):
         return d_world, box_dir
 
     # -- value box (type while dragging)
+    def _axis_param(self, c, n, x, y):
+        """Distance along the line c + t n to the point nearest the ray through screen (x, y);
+        None when the line is seen end-on."""
+        o, r = self.camera.ray(x, y, self.width(), self.height())
+        o, r = np.asarray(o, float), np.asarray(r, float)
+        b = float(n @ r)
+        den = float(n @ n) * float(r @ r) - b * b
+        if den < 1e-6 * float(r @ r):
+            return None
+        w0 = c - o
+        return float((b * (w0 @ r) - float(r @ r) * (w0 @ n)) / den)
+
     def _typed_live(self):
         """'extrude' or 'fillet' when a drag's value was typed and awaits Enter, else None."""
         if self._extrude_state is not None and self._extrude_state.get("typed"):
@@ -881,12 +989,16 @@ class Viewport(QOpenGLWidget):
             self.update()
 
     def _finish_extrude(self):
-        c, n = self._extrude_state["center"], self._extrude_state["normal"]
+        st = self._extrude_state
+        c, n = st["center"], st["normal"]
         d = self._extrude_dist
         self._extrude_state = None
         self._extrude_dist = 0.0
         # Set before emitting so the app can dismiss the box if the commit fails.
         self._value_post = {"kind": "extrude", "base": c, "dir": n, "value": d} if abs(d) >= 0.01 else None
+        if st.get("region") is not None:
+            self.region_extrude.emit(d, st["region"])
+            return
         self.extrude_commit.emit(d, tuple(map(float, c)), tuple(map(float, n)))
 
     def _finish_fillet(self):

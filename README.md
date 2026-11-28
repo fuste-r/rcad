@@ -3,6 +3,7 @@
 A small parametric 3D CAD app for Linux, built on [build123d](https://github.com/gumyr/build123d) (OpenCascade), [SolveSpace](https://solvespace.com/)'s `libslvs` constraint solver, and PySide6.
 
 - Sketch on the XY/XZ/YZ planes or on any planar face (line, rectangle, circle)
+- Curves split each other where they cross: overlapping shapes and lines drawn across a shape make separate regions, each of which can be picked, extruded, or revolved on its own
 - Geometric and dimensional constraints solved by libslvs
 - Extrude, revolve, sweep, and loft (add or cut), face push/pull, fillet, chamfer
 - Feature history that rebuilds on edit; save/load `.rcad` projects (JSON); export STEP and STL
@@ -50,6 +51,7 @@ On Wayland with NVIDIA, if the OpenGL context fails to create, try `QT_QPA_PLATF
 | Step back | right-click (without dragging): cancels an open tool, then drops a half-drawn shape, then leaves the drawing tool, then leaves the sketch. On something (or with something selected) it opens that selection's tools at the pointer instead |
 | Next step for a selection | use the quick buttons beside it: a face offers Sketch and Push/Pull, edges Fillet and Chamfer (and 🗑 for a fillet's edge), a highlighted region Extrude and Revolve, sketch geometry the constraints that fit it; ⋯ holds the rest |
 | Push/pull a face | select it, then drag it |
+| Extrude a sketch region | click it (an arrow appears on it), then drag the region or the arrow; type a size while dragging as with push/pull. While regions are picked, a plain click on another region of the same sketch adds it and clicking a picked one drops it. The result adds or cuts depending on where it goes |
 | Fillet or chamfer an edge | drag the edge across itself: toward the body (push) rounds it, away from the body (pull) bevels it; you can switch direction mid-drag. Dragging a fillet's rounded edge resizes it, and pulling it turns it into a chamfer. If the body side can't be seen (the edge faces you), dragging up the screen counts as a pull |
 | Exact size while dragging a face or edge | type a value (units, maths and variables work: `2in + 5mm`, `wall * 2`), then Enter or click; Esc cancels |
 | Change the size just made | click the value box left on the model and type, or drag it sideways to scrub (Shift: fine, Ctrl: coarse) |
