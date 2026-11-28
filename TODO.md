@@ -36,7 +36,7 @@ Interaction ideas taken from superGeometry.app's README (Nov 2026). Several of t
 - [x] Selection shortcuts: double-click selects the whole body, Ctrl+A selects everything, drag a box on empty space to select several, and a tag names what is picked.
 - [ ] Navigation: mouse presets matching other CAD programs (Onshape, Fusion, SolidWorks, Blender, FreeCAD, and others), a settable orbit centre, 90° turn buttons on the view cube, double-click the cube to fit, and saved views.
 - [ ] Smooth onboarding: a new project opens in a sketch on XY looking down with Line active, and leaving a sketch swings to a three-quarter view.
-- [ ] Strict constraints: refuse a constraint or typed value that contradicts the existing ones, with a message, instead of distorting the sketch. Draw constraint marks small, faint, and colour-coded by kind, and keep them from catching clicks meant for geometry.
+- [x] Strict constraints: refuse a constraint or typed value that contradicts the existing ones, with a message, instead of distorting the sketch. Draw constraint marks small, faint, and colour-coded by kind, and keep them from catching clicks meant for geometry.
 - [x] Grid snapping whose step follows the zoom level (for example 1, 5, or 10 mm).
 - [ ] Variable tags on the model: show where each variable acts, and let a tag be clicked to type a value or dragged to change it with the model following live.
 - [ ] History panel: hovering a step outlines the faces and edges it uses, steps can be grouped and folded, an eye suppresses a step, and a failed step turns red and says why.

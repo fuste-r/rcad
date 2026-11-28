@@ -4,7 +4,7 @@ import math
 import sys
 
 import numpy as np
-from PySide6.QtCore import QPoint, QSettings, Qt
+from PySide6.QtCore import QPoint, QSettings, Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut, QSurfaceFormat
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDockWidget, QFileDialog,
@@ -222,6 +222,8 @@ class MainWindow(QMainWindow):
         self.view.construction_key.connect(self.toggle_construction)
         self.view.dim_clicked.connect(self.edit_dimension)
         self.view.dim_menu.connect(self._dimension_menu)
+        self.view.mark_clicked.connect(self.select_constraint)
+        self.view.delete_key.connect(self.delete_selection)
         self.view.fillet_commit.connect(self.on_fillet_commit)
         self.view.fillet_preview.connect(self.on_fillet_preview)
         self.view.fillet_cancel.connect(self.on_fillet_cancel)
@@ -407,6 +409,10 @@ class MainWindow(QMainWindow):
             text, kind = item
             constraints.append(act(text, lambda _=False, k=kind: self.add_constraint(k),
                                    tips.get(text, f"Add a {kind} constraint to the selection")))
+        self.marks_action = act("👁 Show constraint marks", self._toggle_marks,
+                                "Small symbols beside the geometry each constraint holds", checkable=True)
+        self.marks_action.setChecked(True)
+        constraints += [None, self.marks_action]
         line.add_group("sketch", "Constrain", constraints)
         line.add_group("sketch", "Modify", [
             act("┄ Construction (Q)", self.toggle_construction,
@@ -732,6 +738,7 @@ class MainWindow(QMainWindow):
         self.tool_actions[name].setChecked(True)
         self.draw_button.setText(f"Draw: {self.tool_actions[name].text().split(' ', 1)[1]} ▾")
         self.tool = name
+        self.view.marks_clickable = name == "select"
         self.pending = None
         self._pending_snap = None
         self._arc_start = None
@@ -760,6 +767,8 @@ class MainWindow(QMainWindow):
         self.view.sel_faces.clear()
         self.view.sel_edges.clear()
         self.view.sel_plane = None
+        self.view.sel_constraint = None
+        self.view.conflicts = set()
         for f in self.doc.features:
             if f.kind == "sketch" and (self.mode == "model" or f is self.doc.features[self.sketch_index]):
                 f.sketch.selection = []
@@ -1279,6 +1288,7 @@ class MainWindow(QMainWindow):
         return ok
 
     def _sketch_click(self, x, y, mods):
+        self.view.sel_constraint = None
         self._push_sketch_undo()
         sk = self.sketch
         if self.tool == "select":
@@ -1878,12 +1888,45 @@ class MainWindow(QMainWindow):
             needs = {"concentric": "two circles or arcs"}.get(kind) or CONSTRAINT_KINDS[kind][0]
             self.statusBar().showMessage(f"Select the right items for '{kind}' ({needs}).", 6000)
             return
+        self._add_strict(new, kind)
+
+    def _add_strict(self, new: list[Constraint], kind: str):
+        """Add constraints only if the sketch can take them as it is: one that contradicts or repeats
+        others is refused with their names (shown red on the sketch), and so is one that would shrink
+        a line, circle or arc to nothing."""
+        sk = self.sketch
+        n0, before = len(sk.constraints), sk.collapsed()
+        snapshot = [list(p) for p in sk.points], list(sk.circles)
         sk.constraints += new
-        sk.version += 1
-        if not self._solve_sketch():
-            del sk.constraints[-len(new):]
-            self.sketch.solve()
-            self.refresh_constraints()
+        sk.variables = self.doc.variables
+        ok = sk.solve()
+        squashed = sk.collapsed() - before if ok else set()
+        if ok and not squashed:
+            sk.version += 1
+            self.view.conflicts = set()
+            self._solve_sketch()
+            return True
+        clash = [i for i in sk.failed if i < n0] if not ok else []
+        del sk.constraints[n0:]
+        sk.points, sk.circles = snapshot
+        if not ok and not clash:  # the solver named only the new one: find what it clashes with
+            clash = sk.clashing(new)
+        sk.solve()
+        label = self.CONSTRAINT_LABELS.get(kind, kind.replace("_", " ").capitalize())
+        if squashed:
+            names = {"l": "line", "c": "circle", "a": "arc"}
+            what = ", ".join(sorted({names[k] for k, _ in squashed}))
+            msg = f"{label} refused: it would shrink a {what} to nothing."
+        elif clash:
+            msg = (f"{label} refused: it contradicts or repeats "
+                   + ", ".join(self._constraint_name(sk.constraints[i]) for i in clash) + " (shown in red).")
+            self._flash_conflicts(clash)
+        else:
+            msg = f"{label} refused: no shape fits it together with the sketch's other constraints."
+        self.statusBar().showMessage(msg, 8000)
+        self.refresh_constraints()
+        self._update_regions()
+        return False
 
     def edit_constraint(self, item):
         self.edit_dimension(self.constraints.row(item))
@@ -1918,8 +1961,11 @@ class MainWindow(QMainWindow):
         self._constraint_session(self.CONSTRAINT_LABELS.get(c.kind, c.kind.title()), c, new=False)
 
     def delete_dimension(self, i: int):
+        """Remove constraint i (a dimension or a mark)."""
         if self.mode != "sketch" or not 0 <= i < len(self.sketch.constraints):
             return
+        self.view.sel_constraint = None
+        self.view.conflicts = set()
         self._settle_session()
         self._push_sketch_undo()
         self.sketch.remove_constraint(i)
@@ -1927,13 +1973,53 @@ class MainWindow(QMainWindow):
         self.view.set_dim_hover(None)
         self._solve_sketch()
 
+    def select_constraint(self, i: int):
+        """A click on a constraint mark: select it (again: drop it), so Delete removes it."""
+        if self.mode != "sketch" or not 0 <= i < len(self.sketch.constraints):
+            return
+        v = self.view
+        v.sel_constraint = None if v.sel_constraint == i else i
+        v.sketch_sel.clear()
+        if v.sel_constraint is not None:
+            self.constraints.setCurrentRow(i)
+            c = self.sketch.constraints[i]
+            self.statusBar().showMessage(f"{self._constraint_name(c)} selected: Delete removes it.", 4000)
+        v._restyle_dims()
+        self._update_regions()
+
+    def _constraint_name(self, c: Constraint) -> str:
+        name = self.CONSTRAINT_LABELS.get(c.kind, c.kind.replace("_", " ").capitalize())
+        return f"{name} {self.unit.fmt(c.value)}" if c.value is not None else name
+
+    def _toggle_marks(self, on: bool):
+        self.view.show_marks = bool(on)
+        self.view.update()
+
+    def _flash_conflicts(self, cids):
+        """Show the constraints a refused one clashed with in red for a few seconds."""
+        self.view.conflicts = set(cids)
+        self.view._restyle_dims()
+        self.view.update()
+        token = object()
+        self._conflict_token = token
+
+        def clear():
+            if getattr(self, "_conflict_token", None) is token:
+                self.view.conflicts = set()
+                self.view._restyle_dims()
+                self.view.update()
+        QTimer.singleShot(4000, clear)
+
     def _dimension_menu(self, i: int, x: float, y: float):
         """Right-click on a dimension's label: change it or delete it."""
         if self.mode != "sketch" or not 0 <= i < len(self.sketch.constraints):
             return
+        c = self.sketch.constraints[i]
         menu = QMenu(self.view)
-        menu.addAction("✎ Change", lambda: self.edit_dimension(i))
-        menu.addAction("🗑 Delete dimension", lambda: self.delete_dimension(i))
+        sized = c.value is not None or c.expression is not None
+        if sized:
+            menu.addAction("✎ Change", lambda: self.edit_dimension(i))
+        menu.addAction("🗑 Delete dimension" if sized else "🗑 Delete constraint", lambda: self.delete_dimension(i))
         self.dimension_menu = menu
         menu.popup(self.view.mapToGlobal(QPoint(int(x), int(y))))
 
@@ -1964,6 +2050,11 @@ class MainWindow(QMainWindow):
         self.view.update()
 
     def delete_selection(self):
+        if self.mode != "sketch":
+            return
+        if self.view.sel_constraint is not None and not self.view.sketch_sel:
+            self.delete_dimension(self.view.sel_constraint)
+            return
         self._push_sketch_undo()
         sk = self.sketch
         for kind in ("l", "c", "a", "p"):  # deleting points last keeps the other indices stable

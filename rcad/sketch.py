@@ -126,6 +126,7 @@ class Sketch:
     status: str = "unsolved"
     dof: int = -1
     version: int = 0  # incremented on edit to enable shape caching
+    failed: list = field(default_factory=list, repr=False, compare=False)  # constraints the last failed solve named
     _region_cache: tuple | None = field(default=None, init=False, repr=False, compare=False)
 
     # -- editing
@@ -160,6 +161,46 @@ class Sketch:
         (cu, cv), r, a0, sweep = self.arc_geometry(i)
         return [(cu + r * math.cos(a0 + sweep * t), cv + r * math.sin(a0 + sweep * t))
                 for t in np.linspace(0, 1, n)]
+
+    def _constraint_points(self, c: Constraint) -> set:
+        """The points constraint c holds, directly or through its lines, circles and arcs."""
+        out = set()
+        for t, r in zip(CONSTRAINT_KINDS[c.kind][0], c.refs):
+            if t == "p":
+                out.add(r)
+            elif t == "l":
+                out |= set(self.lines[r])
+            elif t == "c":
+                out.add(self.circles[r][0])
+            elif t == "a":
+                out |= set(self.arcs[r])
+        return out
+
+    def clashing(self, new: list[Constraint]) -> list[int]:
+        """Existing constraints that stop `new` from fitting: each one whose removal lets the sketch
+        solve with `new` added. Only constraints sharing points with `new` are tried."""
+        touched = set().union(*(self._constraint_points(c) for c in new))
+        out = []
+        for i, c in enumerate(self.constraints):
+            if not self._constraint_points(c) & touched:
+                continue
+            trial = Sketch.from_dict(self.to_dict())
+            trial.variables = self.variables
+            trial.constraints = [x for j, x in enumerate(trial.constraints) if j != i] + \
+                [Constraint(**asdict(x)) for x in new]
+            try:
+                if trial.solve():
+                    out.append(i)
+            except ValueError:
+                pass
+        return out
+
+    def collapsed(self, tol: float = 1e-6) -> set:
+        """Lines, circles and arcs shrunk to nothing, as ("l" | "c" | "a", index)."""
+        out = {("l", i) for i, (a, b) in enumerate(self.lines) if math.dist(self.points[a], self.points[b]) < tol}
+        out |= {("c", i) for i, (_, r) in enumerate(self.circles) if r < tol}
+        out |= {("a", i) for i, (c, a, _) in enumerate(self.arcs) if math.dist(self.points[c], self.points[a]) < tol}
+        return out
 
     def is_construction(self, kind: str, i: int) -> bool:
         return (kind, i) in self.construction
@@ -303,6 +344,7 @@ class Sketch:
         self.dof = s.Dof
         if res != 0:
             bad = sorted({handle_to_constraint[h] for h in s.Failed if h in handle_to_constraint})
+            self.failed = bad
             why = {1: "inconsistent", 2: "did not converge", 3: "too many unknowns"}.get(res, f"error {res}")
             self.status = f"{why}" + (f" (constraints {bad})" if bad else "")
             return False

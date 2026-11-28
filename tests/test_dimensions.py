@@ -53,10 +53,10 @@ def test_hover_highlights_the_label_and_what_it_measures(qapp, monkeypatch):
     w = _window(monkeypatch)
     lbl = _label(w, 5)
     lbl.enterEvent(QEnterEvent(QPointF(2, 2), QPointF(2, 2), QPointF(2, 2)))
-    assert w.view.dim_hover == 5 and lbl._look == "hover"
+    assert w.view.dim_hover == 5 and lbl.look == "hover"
     assert w.view.dim_items(5) == {("p", 0), ("p", 1), ("l", 0)}  # the two corners and the line between
     lbl.leaveEvent(None)
-    assert w.view.dim_hover is None and lbl._look == "normal"
+    assert w.view.dim_hover is None and lbl.look == "normal"
     assert w.view.dim_items(6) == {("c", 0)}
 
 
@@ -64,7 +64,7 @@ def test_click_changes_the_dimension(qapp, monkeypatch):
     w = _window(monkeypatch)
     sk = w.sketch
     _press(_label(w, 5))
-    assert w.tool_bar.active and w.view.dim_active == 5 and _label(w, 5)._look == "active"
+    assert w.tool_bar.active and w.view.dim_active == 5 and _label(w, 5).look == "active"
     w.tool_bar.fields["value"].setText("55")  # the sketch follows as it is typed
     assert sk.points[1][0] == pytest.approx(55)
     w.tool_bar.finish()

@@ -26,23 +26,40 @@ class DimLabel(QLabel):
     STYLE = ("color: {fg}; background: {bg}; padding: 2px 4px; border-radius: 3px;"
              " border: 1px solid {border};")
 
-    def __init__(self, view: "Viewport"):
+    def __init__(self, view: "Viewport", mark: bool = False):
         super().__init__(view)
         self.view = view
         self.cid = -1
+        self.mark = mark  # a constraint mark (H, ∥, T, ...) rather than a dimension
+        self.color = (1.0, 0.24, 0.24)
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip("Click to change this dimension; right-click to delete it")
         self._look = None
 
     def set_look(self, look: str):
-        """normal, hover (pointer over it) or active (open in the settings bar)."""
-        if look == self._look:
+        """normal, hover (pointer over it), active (being edited, or a selected mark) or conflict."""
+        key = (look, self.color)
+        if key == self._look:
             return
-        self._look = look
+        self._look = key
+        if self.mark:
+            r, g, b = (int(c * 255) for c in self.color)
+            fg, bg, border = {"normal": (f"rgba({r},{g},{b},150)", "rgba(0,0,0,60)", "transparent"),
+                              "hover": (f"rgb({r},{g},{b})", "rgba(0,0,0,170)", f"rgb({r},{g},{b})"),
+                              "active": ("#ffffff", f"rgba({r},{g},{b},210)", "#ffffff"),
+                              "conflict": ("#ffffff", "rgba(220,30,30,230)", "#ffffff")}[look]
+            self.setStyleSheet(f"color: {fg}; background: {bg}; border: 1px solid {border};"
+                               " border-radius: 3px; padding: 0px 3px; font-size: 10px; font-weight: 600;")
+            return
         fg, bg, border = {"normal": ("#ff3c3c", "rgba(0,0,0,120)", "transparent"),
                           "hover": ("#ffffff", "rgba(200,40,40,200)", "#ff8080"),
-                          "active": ("#ffffff", "rgba(230,120,20,220)", "#ffc080")}[look]
+                          "active": ("#ffffff", "rgba(230,120,20,220)", "#ffc080"),
+                          "conflict": ("#ffffff", "rgba(220,30,30,230)", "#ffffff")}[look]
         self.setStyleSheet(self.STYLE.format(fg=fg, bg=bg, border=border))
+
+    @property
+    def look(self) -> str | None:
+        return None if self._look is None else self._look[0]
 
     def enterEvent(self, e):
         self.view.set_dim_hover(self.cid)
@@ -56,7 +73,7 @@ class DimLabel(QLabel):
     def mousePressEvent(self, e):
         p = self.mapToParent(e.position().toPoint())
         if e.button() == Qt.LeftButton:
-            self.view.dim_clicked.emit(self.cid)
+            (self.view.mark_clicked if self.mark else self.view.dim_clicked).emit(self.cid)
         elif e.button() == Qt.RightButton:
             self.view.dim_menu.emit(self.cid, float(p.x()), float(p.y()))
         e.accept()
@@ -73,7 +90,9 @@ class Viewport(QOpenGLWidget):
     planes_toggled = Signal(bool)  # P: the reference planes were shown (True) or hidden
     construction_key = Signal()  # Q in a sketch: toggle construction geometry
     dim_clicked = Signal(int)  # a dimension on the sketch was clicked: its constraint index
-    dim_menu = Signal(int, float, float)  # a dimension was right-clicked: constraint index, view x, y
+    dim_menu = Signal(int, float, float)  # a dimension or mark was right-clicked: constraint index, view x, y
+    mark_clicked = Signal(int)  # a constraint mark was clicked: its constraint index
+    delete_key = Signal()  # Delete in a sketch
     sketch_mouse = Signal(str, float, float)  # phase ("press"|"move"|"release"), x, y
     fillet_commit = Signal(float, list, str)  # size_mm, [edge midpoints], "fillet" (push) | "chamfer" (pull)
     fillet_preview = Signal(float, list, str)  # live size_mm, [edge midpoints], kind
@@ -88,6 +107,11 @@ class Viewport(QOpenGLWidget):
         self._dim_labels: list[DimLabel] = []
         self.dim_hover: int | None = None  # constraint whose label the pointer is over
         self.dim_active: int | None = None  # constraint being edited in the settings bar
+        self._mark_labels: list[DimLabel] = []
+        self.show_marks = True  # constraint marks on the sketch
+        self.marks_clickable = True  # off while a drawing tool is active: clicks go to the sketch
+        self.sel_constraint: int | None = None  # the mark clicked last
+        self.conflicts: set[int] = set()  # constraints shown red: what a refused constraint clashed with
         self.camera = Camera()
         self.theme: Theme = LIGHT
         self.cube_hover: str | None = None
@@ -632,12 +656,13 @@ class Viewport(QOpenGLWidget):
         pl = sk.plane
         world = np.array([pl.to3d(*p) for p in sk.points]).reshape(-1, 3)
 
-        measured = self.dim_items(self.dim_hover if self.dim_hover is not None else self.dim_active) \
-            if sk is self.sketch else set()
+        focus = next((c for c in (self.dim_hover, self.dim_active, self.sel_constraint) if c is not None), None)
+        measured = self.dim_items(focus) if sk is self.sketch else set()
+        measured_color = self.mark_color(sk.constraints[focus].kind) if measured else self.DIM_COLOR
 
         def col(kind, i):
             if (kind, i) in measured:
-                GL.glColor3f(*self.DIM_COLOR)  # the dimension labels' red: what the label measures
+                GL.glColor3f(*measured_color)  # in the label's colour: what it measures or holds
             else:
                 GL.glColor3f(*(self.theme.sketch_select if (kind, i) in selected else base_color))
 
@@ -1151,6 +1176,9 @@ class Viewport(QOpenGLWidget):
         if e.key() == Qt.Key_P and not e.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier):
             self.toggle_planes()  # (typing into a value box above takes the key first)
             return
+        if e.key() == Qt.Key_Delete and self.sketch is not None:
+            self.delete_key.emit()
+            return
         if e.key() == Qt.Key_Q and self.sketch is not None and not e.modifiers() & (
                 Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier):
             self.construction_key.emit()
@@ -1319,17 +1347,116 @@ class Viewport(QOpenGLWidget):
 
     DIM_COLOR = (1.0, 0.24, 0.24)  # dimension labels (#ff3c3c) and the geometry they measure
 
+    # kind -> (symbol, colour); colours group the kinds: orientation, relation, incidence, tangency
+    MARKS = {
+        "horizontal": ("H", (0.35, 0.65, 1.0)), "vertical": ("V", (0.35, 0.65, 1.0)),
+        "phorizontal": ("H", (0.35, 0.65, 1.0)), "pvertical": ("V", (0.35, 0.65, 1.0)),
+        "parallel": ("∥", (0.3, 0.85, 0.45)), "perpendicular": ("⊥", (0.3, 0.85, 0.45)),
+        "equal": ("=", (0.3, 0.85, 0.45)),
+        "coincident": ("●", (0.75, 0.5, 1.0)), "point_on_line": ("∈", (0.75, 0.5, 1.0)),
+        "point_on_circle": ("∈", (0.75, 0.5, 1.0)), "point_on_arc": ("∈", (0.75, 0.5, 1.0)),
+        "midpoint": ("M", (0.75, 0.5, 1.0)),
+        "tangent": ("T", (1.0, 0.65, 0.2)), "tangent_arcs": ("T", (1.0, 0.65, 0.2)),
+        "symmetry": ("⇋", (0.25, 0.85, 0.85)), "fixed": ("Fix", (0.7, 0.7, 0.7)),
+        "expression": ("ƒ", (1.0, 0.24, 0.24)),
+    }
+
+    def mark_color(self, kind: str):
+        return self.MARKS.get(kind, ("", self.DIM_COLOR))[1]
+
+    def _mark_spots(self, cid, c):
+        """Where constraint c's marks go: [(screen x, y)], beside the geometry it holds."""
+        sk, w, h = self.sketch, self.width(), self.height()
+        pl = sk.plane
+
+        def screen(uv):
+            q = self.camera.project(np.array(pl.to3d(*uv), float).reshape(1, 3), w, h)[0][:2]
+            return None if np.isnan(q).any() else q
+
+        def beside_line(li):  # off the middle of the line, on one side
+            a, b = (screen(sk.points[i]) for i in sk.lines[li])
+            if a is None or b is None:
+                return None
+            d = b - a
+            n = np.array([-d[1], d[0]]) / max(np.linalg.norm(d), 1e-9)
+            if n[1] > 0 or (abs(n[1]) < 1e-9 and n[0] < 0):
+                n = -n  # above (or right of) the line on screen
+            return (a + b) / 2 + 13 * n
+
+        def beside_point(pi):
+            q = screen(sk.points[pi])
+            return None if q is None else q + np.array([9.0, -16.0])
+
+        k, r = c.kind, c.refs
+        if k in ("horizontal", "vertical"):
+            spots = [beside_line(r[0])]
+        elif k in ("parallel", "perpendicular", "equal"):
+            spots = [beside_line(r[0]), beside_line(r[1])]
+        elif k in ("coincident", "fixed", "point_on_line", "point_on_circle", "point_on_arc", "midpoint"):
+            spots = [beside_point(r[0])]
+        elif k in ("phorizontal", "pvertical", "expression", "symmetry"):  # between the two points
+            a, b = screen(sk.points[r[0]]), screen(sk.points[r[1]])
+            spots = [None if a is None or b is None else (a + b) / 2 + np.array([0.0, -14.0])]
+        elif k == "tangent":
+            shared = set(sk.lines[r[0]]) & set(sk.arcs[r[1]][1:])
+            spots = [beside_point(min(shared))] if shared else []
+        elif k == "tangent_arcs":
+            shared = set(sk.arcs[r[0]][1:]) & set(sk.arcs[r[1]][1:])
+            spots = [beside_point(min(shared))] if shared else []
+        else:
+            spots = []
+        return [q for q in spots if q is not None]
+
+    def _sync_marks(self):
+        """A small symbol for each constraint that has no dimension label, beside what it holds.
+        Marks that land on the same spot line up side by side."""
+        sk = self.sketch
+        wanted = []
+        if sk is not None and self.show_marks:
+            for cid, c in enumerate(sk.constraints):
+                if c.kind not in self.MARKS:
+                    continue
+                try:
+                    wanted += [(cid, c.kind, q) for q in self._mark_spots(cid, c)]
+                except (IndexError, KeyError):
+                    continue
+        while len(self._mark_labels) < len(wanted):
+            lbl = DimLabel(self, mark=True)
+            lbl.setToolTip("")
+            self._mark_labels.append(lbl)
+        taken: dict = {}
+        for lbl, (cid, kind, q) in zip(self._mark_labels, wanted):
+            symbol, color = self.MARKS[kind]
+            lbl.cid, lbl.color = cid, color
+            lbl.setText(symbol)
+            lbl.setToolTip(f"{kind.replace('_', ' ')} (click to select, right-click to delete)")
+            lbl.setAttribute(Qt.WA_TransparentForMouseEvents, not self.marks_clickable)
+            lbl.adjustSize()
+            key = (int(q[0]) // 12, int(q[1]) // 12)
+            x = taken.get(key, int(q[0] - lbl.width() / 2))
+            taken[key] = x + lbl.width() + 2
+            lbl.move(x, int(q[1] - lbl.height() / 2))
+            lbl.show()
+            lbl.raise_()
+        for lbl in self._mark_labels[len(wanted):]:
+            lbl.hide()
+            lbl.cid = -1
+
     def set_dim_active(self, cid):
         self.dim_active = cid
         self._restyle_dims()
         self.update()
 
     def _restyle_dims(self):
-        for lbl in self._dim_labels:
-            lbl.set_look("active" if lbl.cid == self.dim_active and lbl.cid >= 0
-                         else "hover" if lbl.cid == self.dim_hover and lbl.cid >= 0 else "normal")
+        for lbl in self._dim_labels + self._mark_labels:
+            if lbl.cid < 0:
+                continue
+            lbl.set_look("conflict" if lbl.cid in self.conflicts
+                         else "active" if lbl.cid in (self.dim_active, self.sel_constraint)
+                         else "hover" if lbl.cid == self.dim_hover else "normal")
 
     def _sync_dim_labels(self):
+        self._sync_marks()
         if self.sketch is None:
             for lbl in self._dim_labels:
                 lbl.hide()
@@ -1383,7 +1510,8 @@ class Viewport(QOpenGLWidget):
         for idx in range(len(positions), len(self._dim_labels)):
             self._dim_labels[idx].hide()
             self._dim_labels[idx].cid = -1
-        if self.dim_hover is not None and self.dim_hover not in {p[0] for p in positions}:
+        shown = {p[0] for p in positions} | {l.cid for l in self._mark_labels if not l.isHidden()}
+        if self.dim_hover is not None and self.dim_hover not in shown:
             self.dim_hover = None  # its label went away under the pointer
         self._restyle_dims()
 
