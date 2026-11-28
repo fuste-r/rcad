@@ -54,6 +54,7 @@ class Viewport(QOpenGLWidget):
         self.region_fill: list[tuple[np.ndarray, tuple]] = []  # (world triangles, RGBA) for highlighted regions
         self.sketch_sel: set[tuple[str, int]] = set()
         self.preview: list[np.ndarray] = []  # world-space polylines for rubber-banding
+        self.snap_mark = None  # {"kind", "at": world point, "guides": [(world a, world b)]} while drawing
         self.sel_faces: set[int] = set()
         self.sel_edges: set[int] = set()
         self.hover_face: int | None = None
@@ -506,6 +507,8 @@ class Viewport(QOpenGLWidget):
                 self._draw_sketch_geometry(other, set(), self.theme.sketch_faded)
         if sk is not None:
             self._draw_sketch_geometry(sk, self.sketch_sel, self.theme.sketch)
+        if sk is not None and self.snap_mark is not None:
+            self._draw_snap_mark(self.snap_mark)
         GL.glColor3f(*self.theme.preview)
         GL.glLineWidth(1.5)
         for poly in self.preview:
@@ -516,6 +519,45 @@ class Viewport(QOpenGLWidget):
         GL.glLineWidth(1)
         GL.glEnable(GL.GL_DEPTH_TEST)
         GL.glEnable(GL.GL_LIGHTING)
+
+    SNAP_COLOR = (0.15, 0.75, 0.95)
+
+    def _draw_snap_mark(self, mark):
+        """A small screen-sized symbol at the snap point (square: point, triangle: midpoint, cross: on a
+        curve) and dashed alignment guides."""
+        at = np.asarray(mark["at"], float)
+        s = 6.0 / self._px_per_world(at)  # half size: 6 px
+        r, u = self.camera.right * s, self.camera.up * s
+        GL.glColor3f(*self.SNAP_COLOR)
+        GL.glLineWidth(1.5)
+        if mark["guides"]:
+            GL.glEnable(GL.GL_LINE_STIPPLE)
+            GL.glLineStipple(2, 0x3333)
+            GL.glBegin(GL.GL_LINES)
+            for a, b in mark["guides"]:
+                GL.glVertex3f(*a)
+                GL.glVertex3f(*b)
+            GL.glEnd()
+            GL.glDisable(GL.GL_LINE_STIPPLE)
+        kind = mark["kind"]
+        if kind == "point":
+            shape = [at - r - u, at + r - u, at + r + u, at - r + u]
+        elif kind == "midpoint":
+            shape = [at - r - u, at + r - u, at + u * 1.1]
+        elif kind in ("on_line", "on_circle"):
+            shape = None
+            GL.glBegin(GL.GL_LINES)
+            for p in (at - r - u, at + r + u, at - r + u, at + r - u):
+                GL.glVertex3f(*p)
+            GL.glEnd()
+        else:  # alignment only: a small dot-like diamond
+            shape = [at - r * 0.6, at - u * 0.6, at + r * 0.6, at + u * 0.6]
+        if shape is not None:
+            GL.glBegin(GL.GL_LINE_LOOP)
+            for p in shape:
+                GL.glVertex3f(*p)
+            GL.glEnd()
+        GL.glLineWidth(1)
 
     # -- orientation cube
     def _cube_rect(self):

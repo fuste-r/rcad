@@ -527,5 +527,5 @@ def test_snap_field_follows_units_and_takes_expressions(qapp):
     w.snap.setText("1/")  # mid-edit: keep snapping to the last good value
     w.new_sketch()
     x, y = w.view.camera.project(np.array([(3.0, 3.3, 0)], float), w.view.width(), w.view.height())[0][:2]
-    _pi, uv = w._snap(x, y)
+    uv = w._snap(x, y).uv
     assert uv[0] == pytest.approx(3.175) and uv[1] == pytest.approx(3.175)

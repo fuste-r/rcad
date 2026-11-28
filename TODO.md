@@ -13,7 +13,8 @@
 ## P1: Interaction and sketching
 
 - [x] Unify direct manipulation for extrude, push/pull, fillet, and chamfer with live previews and precise numeric entry; reduce the split between drag interactions and dialogs.
-- [ ] Add smart snapping and optional auto-constraints for endpoints, midpoints, centers, tangencies, and alignments.
+- [x] Add smart snapping and optional auto-constraints for endpoints, midpoints, centers, and alignments.
+- [ ] Snap to tangency (needs the tangent constraint and arcs).
 - [ ] Make displayed sketch dimensions editable on-canvas and open the corresponding constraint editor when selected.
 - [x] Offer context-aware actions based on the current selection, and add direct drag editing for chamfer to complement the existing fillet interaction.
 - [ ] Add sketch arcs, trim/split/offset tools, construction geometry, and projected model edges. Support closed profiles that combine lines, arcs, and circles.
@@ -34,7 +35,7 @@ Interaction ideas taken from superGeometry.app's README (Nov 2026). Several of t
 - [ ] Navigation: mouse presets matching other CAD programs (Onshape, Fusion, SolidWorks, Blender, FreeCAD, and others), a settable orbit centre, 90° turn buttons on the view cube, double-click the cube to fit, and saved views.
 - [ ] Smooth onboarding: a new project opens in a sketch on XY looking down with Line active, and leaving a sketch swings to a three-quarter view.
 - [ ] Strict constraints: refuse a constraint or typed value that contradicts the existing ones, with a message, instead of distorting the sketch. Draw constraint marks small, faint, and colour-coded by kind, and keep them from catching clicks meant for geometry.
-- [ ] Grid snapping whose step follows the zoom level (for example 1, 5, or 10 mm).
+- [x] Grid snapping whose step follows the zoom level (for example 1, 5, or 10 mm).
 - [ ] Variable tags on the model: show where each variable acts, and let a tag be clicked to type a value or dragged to change it with the model following live.
 - [ ] History panel: hovering a step outlines the faces and edges it uses, steps can be grouped and folded, an eye suppresses a step, and a failed step turns red and says why.
 - [ ] Run rebuilds off the UI thread, with a "Working…" indicator and a Stop button that cancels the rebuild and reverts the change that started it.

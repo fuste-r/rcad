@@ -33,6 +33,8 @@ CONSTRAINT_KINDS = {
     "diameter": ("c", True),
     "fixed": ("p", False),
     "point_on_line": ("pl", False),
+    "midpoint": ("pl", False),
+    "point_on_circle": ("pc", False),
     "expression": ("pp", True),
     "symmetry": ("ppl", False),
 }
@@ -229,6 +231,10 @@ class Sketch:
                     )
             elif k == "point_on_line":
                 h = s.addPointOnLine(pts[r[0]], lines[r[1]], wp, g)
+            elif k == "midpoint":
+                h = s.addMidPoint(pts[r[0]], lines[r[1]], wp, g)
+            elif k == "point_on_circle":
+                h = s.addPointOnCircle(pts[r[0]], circles[r[1]], g)
             else:
                 raise ValueError(f"unknown constraint {k}")
             for handle in h if isinstance(h, tuple) else (h,):

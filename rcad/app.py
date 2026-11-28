@@ -25,6 +25,7 @@ from .sketch import (
     standard_plane,
     reflect_point_across_line,
 )
+from .snapping import START, Snap, find_snap, grid_step
 from .units import MM, UNITS
 from .theme import CHOICES, apply_choice
 from .tool_bar import Choice, Number, ToolSettingsBar
@@ -34,6 +35,17 @@ from .value_box import FieldSet, NumberField
 from .viewport import Viewport
 
 FILE_FILTER = "rCad project (*.rcad)"
+
+
+def _corner_kept(cons, start_idx, snap, n0):
+    """A rectangle's corners are new points even when a click landed on an existing point:
+    tie those corners to the points they were drawn on."""
+    out = list(cons)
+    if start_idx is not None:
+        out.append(Constraint("coincident", [start_idx, n0]))
+    if snap is not None and snap.point is not None:
+        out.append(Constraint("coincident", [snap.point, n0 + 2]))
+    return out
 
 
 class SweepDialog(QDialog):
@@ -221,6 +233,9 @@ class MainWindow(QMainWindow):
         self.fields.accepted.connect(self._on_fields_accepted)
         self.fields.cancelled.connect(self.cancel)
         self._draw_mouse = None  # (snapped point index, (u, v), x, y) of the last drawing hover
+        self._draw_snap = None  # the Snap behind _draw_mouse
+        self._snap_text = ""  # what the pointer snaps to, for the status bar
+        self._pending_snap = None  # the Snap the pending first point was placed with
         self._drawn = None  # shape just drawn whose size boxes stay on it (see _show_drawn)
         # Settings bar for the active feature tool; the feature previews live while it is open
         self.tool_bar = ToolSettingsBar(self.view, lambda: self.unit, lambda: self.doc.variables)
@@ -391,7 +406,7 @@ class MainWindow(QMainWindow):
         line.add_separator("sketch")
         self.snap = NumberField(1.0, "length", MM, lo=0.0, hi=1e4)
         self.snap.setFixedWidth(80)
-        self.snap.HINT = "Grid snap (0 = off). " + NumberField.HINT
+        self.snap.HINT = "Grid snap step when zoomed in; zooming out scales it up (0 = off). " + NumberField.HINT
         self.snap.setToolTip(self.snap.HINT)
         snap_label = QLabel(" Snap ")
         line.add_widget("sketch", snap_label)
@@ -494,6 +509,8 @@ class MainWindow(QMainWindow):
         self.view.sketch_sel.clear()
         self.view.preview = []
         self.pending = None
+        self._pending_snap = None
+        self.view.snap_mark = None
         self.hover_region = None
         self._update_regions()
 
@@ -563,6 +580,8 @@ class MainWindow(QMainWindow):
         sk.selection = [tuple(p) for p in d.get("selection", [])]
         sk.solve()
         self.pending = None
+        self._pending_snap = None
+        self.view.snap_mark = None
         self.view.preview = []
         self.view.sketch_sel.clear()
         self.hover_region = None
@@ -704,6 +723,8 @@ class MainWindow(QMainWindow):
         self.draw_button.setText(f"Draw: {self.tool_actions[name].text().split(' ', 1)[1]} ▾")
         self.tool = name
         self.pending = None
+        self._pending_snap = None
+        self.view.snap_mark = None
         self.fields.stop()
         self.hover_region = None
         self.view.preview = []
@@ -719,6 +740,8 @@ class MainWindow(QMainWindow):
             return
         ending_chain = self.mode == "sketch" and self.tool == "line" and self.pending is not None
         self.pending = None
+        self._pending_snap = None
+        self.view.snap_mark = None
         self.fields.stop()
         self.view.preview = []
         self.view.sketch_sel.clear()
@@ -896,18 +919,48 @@ class MainWindow(QMainWindow):
         self._update_regions()
         self.mark_dirty()
 
-    def _snap(self, x, y):
-        """-> (existing point index or None, (u, v)) for the cursor, or None if the ray misses the plane."""
-        pi = self.view.nearest_sketch_point(x, y)
-        if pi is not None:
-            return pi, tuple(self.sketch.points[pi])
+    def _snap(self, x, y, mods=None) -> Snap | None:
+        """Where a drawing click at view (x, y) lands, or None if the ray misses the plane.
+        Ctrl places it freely: on the grid only, with no snapping to geometry and no constraints."""
         uv = self.view.sketch_uv(x, y)
         if uv is None:
             return None
+        nxt = self.view.sketch_uv(x + 1, y)
+        mm_per_px = math.dist(uv, nxt) if nxt is not None else 0.1
         g = self.snap.value()
         if g is None:
             g = self.snap.last_valid or 0.0  # keep snapping while the text is being edited
-        return None, ((round(uv[0] / g) * g, round(uv[1] / g) * g) if g > 0 else uv)
+        if mods is None:
+            mods = QApplication.keyboardModifiers()
+        start = self.pending if self.tool == "line" else None
+        return find_snap(self.sketch, uv, self.SNAP_PX * mm_per_px, grid_step(g, mm_per_px), start=start,
+                         smart=not mods & Qt.ControlModifier,
+                         curves=not (self.tool == "circle" and self.pending is not None))
+
+    SNAP_PX = 10  # how close (screen pixels) the pointer must be for a snap
+
+    def _show_snap(self, snap: Snap | None):
+        """Mark where the next point lands and draw its alignment guides; name the snap in the status bar."""
+        self._snap_text = "" if snap is None or snap.kind in ("grid", "free") else snap.describe(self.sketch)
+        if not self._snap_text:
+            self.view.snap_mark = None
+            return
+        sk, pl = self.sketch, self.sketch.plane
+        start_uv = self.pending[1] if self.pending is not None else None
+        self.view.snap_mark = {"kind": snap.kind, "at": np.array(pl.to3d(*snap.uv), float),
+                               "guides": [(np.array(pl.to3d(*a), float), np.array(pl.to3d(*b), float))
+                                          for a, b in snap.guides(sk, start_uv)]}
+        if self.pending is None:  # (while a shape is drawn, the coordinates line names it)
+            self.statusBar().showMessage(f"Snap: {self._snap_text}", 2000)
+
+    def _auto_constrain(self, cons: list[Constraint]):
+        """Add the constraints a snap implies, one at a time, dropping any the sketch can't take."""
+        sk = self.sketch
+        sk.variables = self.doc.variables
+        for c in cons:
+            sk.constraints.append(c)
+            if not sk.solve():
+                sk.constraints.pop()
 
     def _update_regions(self):
         """Refresh the fill for selected and hovered sketch regions (hover_region = (feature index, region))."""
@@ -939,6 +992,7 @@ class MainWindow(QMainWindow):
         "horizontal": "Horizontal", "vertical": "Vertical", "coincident": "Coincident", "parallel": "Parallel",
         "perpendicular": "Perpendicular", "equal": "Equal", "distance": "Distance", "spacing": "Spacing",
         "diameter": "Diameter", "expression": "Expression", "fixed": "Fixed", "point_on_line": "Point on line",
+        "midpoint": "Midpoint", "point_on_circle": "Point on circle",
     }
 
     def _sketch_quick_kinds(self, pts, lines, circles) -> list[str]:
@@ -1199,10 +1253,10 @@ class MainWindow(QMainWindow):
                 sel.add(hit)
             self._update_regions()
             return
-        snap = self._snap(x, y)
+        snap = self._snap(x, y, mods)
         if snap is None:
             return
-        self._draw_at(*snap)
+        self._draw_at(snap.point, snap.uv, snap)
 
     # ---- sizes typed while drawing
     FIELD_SPECS = {
@@ -1380,16 +1434,21 @@ class MainWindow(QMainWindow):
             return
         pi, uv = (self._draw_mouse[:2] if self._draw_mouse is not None else (None, self.pending[1]))
         self._push_sketch_undo()
-        self._draw_at(pi, uv)
+        self._draw_at(pi, uv, self._draw_snap if self._draw_mouse is not None else None)
         self.view.setFocus()
 
-    def _draw_at(self, pi, uv):
-        """Place the next point of the active drawing tool at uv (pi: existing point there)."""
+    def _draw_at(self, pi, uv, snap: Snap | None = None):
+        """Place the next point of the active drawing tool at uv (pi: existing point there). The snap
+        that put it there, if any, adds its constraints to the points it creates."""
         sk = self.sketch
         if self.pending is not None and self.fields.active:
             fixed = self._apply_locks(self.pending[1], uv)
             if math.dist(fixed, uv) > 1e-9:
-                pi, uv = None, fixed
+                pi, uv, snap = None, fixed, None  # typed sizes win over the snap
+        start_snap = self._pending_snap
+        if self.pending is None:
+            self._pending_snap = snap if pi is None else None
+        self.view.snap_mark = None
         if self.tool == "line":
             if self.pending is None:
                 self.pending = (pi, uv)
@@ -1402,9 +1461,17 @@ class MainWindow(QMainWindow):
             a = a_idx if a_idx is not None else sk.add_point(*a_uv)
             b = pi if pi is not None else sk.add_point(*uv)
             if a != b:
-                sk.add_line(a, b)
+                li = sk.add_line(a, b)
                 sk.version += 1
                 self._last_segment = (a, b)
+                cons = start_snap.constraints(a) if start_snap is not None and a_idx is None else []
+                if snap is not None and pi is None:
+                    level = [ax for ax, ref in snap.align if ref == START]
+                    cons += [Constraint("horizontal" if ax == "h" else "vertical", [li]) for ax in level]
+                    snap.align = [x for x in snap.align if x[1] != START]
+                    cons += snap.constraints(b)
+                self._auto_constrain(cons)
+            self._pending_snap = None
             self.pending = (b, tuple(sk.points[b])) if pi is None else None
             self._start_fields()  # the next segment starts with nothing typed
             self._solve_sketch()
@@ -1417,8 +1484,12 @@ class MainWindow(QMainWindow):
                 return
             (u0, v0), (u1, v1) = self.pending[1], uv
             if abs(u1 - u0) > 1e-9 and abs(v1 - v0) > 1e-9:
+                n0 = len(sk.points)
                 sk.add_rect(u0, v0, u1, v1)
                 sk.version += 1
+                cons = start_snap.constraints(n0) if start_snap is not None else []
+                cons += snap.constraints(n0 + 2) if snap is not None else []
+                self._auto_constrain(_corner_kept(cons, self.pending[0], snap, n0))
                 self._solve_sketch()
                 n = len(sk.points)
                 self.set_tool("select")  # so the new region can be highlighted right away
@@ -1436,6 +1507,10 @@ class MainWindow(QMainWindow):
                 c = c_idx if c_idx is not None else sk.add_point(*c_uv)
                 ci = sk.add_circle(c, r)
                 sk.version += 1
+                cons = start_snap.constraints(c) if start_snap is not None and c_idx is None else []
+                if pi is not None:
+                    cons.append(Constraint("point_on_circle", [pi, ci]))  # through the point it was drawn to
+                self._auto_constrain(cons)
                 self._solve_sketch()
                 self.set_tool("select")
                 self._show_drawn({"tool": "circle", "circle": ci})
@@ -1444,12 +1519,14 @@ class MainWindow(QMainWindow):
 
     def _update_preview(self, x, y):
         snap = self._snap(x, y)
+        self._show_snap(snap)
         if snap is None or self.pending is None:
             self.view.preview = []
             self.view.update()
             return
-        self._draw_mouse = (snap[0], snap[1], x, y)
-        self._show_draw_preview(snap[1], x, y)
+        self._draw_mouse = (snap.point, snap.uv, x, y)
+        self._draw_snap = snap
+        self._show_draw_preview(snap.uv, x, y)
 
     def _show_draw_preview(self, uv, x, y):
         """Rubber-band the shape from the pending point to uv (after typed sizes) and show its sizes."""
@@ -1472,7 +1549,9 @@ class MainWindow(QMainWindow):
             self.view.preview = [np.array(Viewport._circle_world(pl, p0, math.dist(p0, uv)))]
         self.view.update()
         u = self.unit
-        self.statusBar().showMessage(f"u={u.from_mm(uv[0]):.{u.decimals}f}  v={u.from_mm(uv[1]):.{u.decimals}f} {u.name}")
+        snapped = f"   ·   snap: {self._snap_text}" if self._snap_text else ""
+        self.statusBar().showMessage(f"u={u.from_mm(uv[0]):.{u.decimals}f}  v={u.from_mm(uv[1]):.{u.decimals}f} {u.name}"
+                                     + snapped)
 
     # ---- constraints
     def add_constraint(self, kind):
