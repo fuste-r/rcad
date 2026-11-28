@@ -20,6 +20,48 @@ from .value_box import ValueBox
 DRAG_PX = 4
 
 
+class DimLabel(QLabel):
+    """A dimension shown on the sketch: hover highlights what it measures, a click edits it,
+    a right-click offers its menu. `cid` is the constraint's index in the sketch."""
+    STYLE = ("color: {fg}; background: {bg}; padding: 2px 4px; border-radius: 3px;"
+             " border: 1px solid {border};")
+
+    def __init__(self, view: "Viewport"):
+        super().__init__(view)
+        self.view = view
+        self.cid = -1
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip("Click to change this dimension; right-click to delete it")
+        self._look = None
+
+    def set_look(self, look: str):
+        """normal, hover (pointer over it) or active (open in the settings bar)."""
+        if look == self._look:
+            return
+        self._look = look
+        fg, bg, border = {"normal": ("#ff3c3c", "rgba(0,0,0,120)", "transparent"),
+                          "hover": ("#ffffff", "rgba(200,40,40,200)", "#ff8080"),
+                          "active": ("#ffffff", "rgba(230,120,20,220)", "#ffc080")}[look]
+        self.setStyleSheet(self.STYLE.format(fg=fg, bg=bg, border=border))
+
+    def enterEvent(self, e):
+        self.view.set_dim_hover(self.cid)
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        if self.view.dim_hover == self.cid:
+            self.view.set_dim_hover(None)
+        super().leaveEvent(e)
+
+    def mousePressEvent(self, e):
+        p = self.mapToParent(e.position().toPoint())
+        if e.button() == Qt.LeftButton:
+            self.view.dim_clicked.emit(self.cid)
+        elif e.button() == Qt.RightButton:
+            self.view.dim_menu.emit(self.cid, float(p.x()), float(p.y()))
+        e.accept()
+
+
 class Viewport(QOpenGLWidget):
     clicked = Signal(float, float, object, object)  # x, y, Qt.MouseButton, Qt.KeyboardModifier
     double_clicked = Signal(float, float, object)  # x, y, Qt.KeyboardModifier (left button)
@@ -30,6 +72,8 @@ class Viewport(QOpenGLWidget):
     region_extrude = Signal(float, object)  # distance_mm, the target region_drag returned
     planes_toggled = Signal(bool)  # P: the reference planes were shown (True) or hidden
     construction_key = Signal()  # Q in a sketch: toggle construction geometry
+    dim_clicked = Signal(int)  # a dimension on the sketch was clicked: its constraint index
+    dim_menu = Signal(int, float, float)  # a dimension was right-clicked: constraint index, view x, y
     sketch_mouse = Signal(str, float, float)  # phase ("press"|"move"|"release"), x, y
     fillet_commit = Signal(float, list, str)  # size_mm, [edge midpoints], "fillet" (push) | "chamfer" (pull)
     fillet_preview = Signal(float, list, str)  # live size_mm, [edge midpoints], kind
@@ -41,7 +85,9 @@ class Viewport(QOpenGLWidget):
         super().__init__()
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)  # so a number typed mid-drag reaches keyPressEvent
-        self._dim_labels = []
+        self._dim_labels: list[DimLabel] = []
+        self.dim_hover: int | None = None  # constraint whose label the pointer is over
+        self.dim_active: int | None = None  # constraint being edited in the settings bar
         self.camera = Camera()
         self.theme: Theme = LIGHT
         self.cube_hover: str | None = None
@@ -586,8 +632,14 @@ class Viewport(QOpenGLWidget):
         pl = sk.plane
         world = np.array([pl.to3d(*p) for p in sk.points]).reshape(-1, 3)
 
+        measured = self.dim_items(self.dim_hover if self.dim_hover is not None else self.dim_active) \
+            if sk is self.sketch else set()
+
         def col(kind, i):
-            GL.glColor3f(*(self.theme.sketch_select if (kind, i) in selected else base_color))
+            if (kind, i) in measured:
+                GL.glColor3f(*self.DIM_COLOR)  # the dimension labels' red: what the label measures
+            else:
+                GL.glColor3f(*(self.theme.sketch_select if (kind, i) in selected else base_color))
 
         def stroke(kind, i, pts):
             """A curve; construction geometry is thin and dashed."""
@@ -1245,15 +1297,48 @@ class Viewport(QOpenGLWidget):
         for hook in self.paint_hooks:
             hook()
 
+    def dim_items(self, cid) -> set:
+        """The sketch items constraint `cid` measures, as ("p" | "l" | "c" | "a", index); a distance
+        between a line's two ends brings the line too."""
+        sk = self.sketch
+        if cid is None or sk is None or not 0 <= cid < len(sk.constraints):
+            return set()
+        from .sketch import CONSTRAINT_KINDS
+        c = sk.constraints[cid]
+        items = {(t, r) for t, r in zip(CONSTRAINT_KINDS[c.kind][0], c.refs)}
+        if c.kind == "distance":
+            ends = set(c.refs)
+            items |= {("l", i) for i, ab in enumerate(sk.lines) if set(ab) == ends}
+        return items
+
+    def set_dim_hover(self, cid):
+        if cid != self.dim_hover:
+            self.dim_hover = cid
+            self._restyle_dims()
+            self.update()
+
+    DIM_COLOR = (1.0, 0.24, 0.24)  # dimension labels (#ff3c3c) and the geometry they measure
+
+    def set_dim_active(self, cid):
+        self.dim_active = cid
+        self._restyle_dims()
+        self.update()
+
+    def _restyle_dims(self):
+        for lbl in self._dim_labels:
+            lbl.set_look("active" if lbl.cid == self.dim_active and lbl.cid >= 0
+                         else "hover" if lbl.cid == self.dim_hover and lbl.cid >= 0 else "normal")
+
     def _sync_dim_labels(self):
         if self.sketch is None:
             for lbl in self._dim_labels:
                 lbl.hide()
+            self.dim_hover = None
             return
         pl = self.sketch.plane
         w, h = self.width(), self.height()
         positions = []
-        for c in self.sketch.constraints:
+        for cid, c in enumerate(self.sketch.constraints):
             if c.value is None:
                 continue
             try:
@@ -1281,16 +1366,15 @@ class Viewport(QOpenGLWidget):
                 sx, sy = self.camera.project(pt, w, h)[0][:2]
                 if np.isnan(sx) or np.isnan(sy):
                     continue
-                prefix = "R " if c.kind == "radius" else ""
-                positions.append((int(sx), int(sy), prefix + self.unit.fmt(c.value)))
+                prefix = {"radius": "R ", "diameter": "Ø "}.get(c.kind, "")
+                positions.append((cid, int(sx), int(sy), prefix + self.unit.fmt(c.value)))
             except Exception:
                 continue
         while len(self._dim_labels) < len(positions):
-            lbl = QLabel(self)
-            lbl.setStyleSheet("color: #ff3c3c; background: rgba(0,0,0,120); padding: 2px 4px; border-radius: 3px;")
-            self._dim_labels.append(lbl)
-        for idx, (x, y, text) in enumerate(positions):
+            self._dim_labels.append(DimLabel(self))
+        for idx, (cid, x, y, text) in enumerate(positions):
             lbl = self._dim_labels[idx]
+            lbl.cid = cid
             lbl.setText(text)
             lbl.move(x, y)
             lbl.adjustSize()
@@ -1298,6 +1382,10 @@ class Viewport(QOpenGLWidget):
             lbl.raise_()
         for idx in range(len(positions), len(self._dim_labels)):
             self._dim_labels[idx].hide()
+            self._dim_labels[idx].cid = -1
+        if self.dim_hover is not None and self.dim_hover not in {p[0] for p in positions}:
+            self.dim_hover = None  # its label went away under the pointer
+        self._restyle_dims()
 
     def wheelEvent(self, e):
         if e.modifiers() & Qt.ControlModifier:

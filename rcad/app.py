@@ -220,6 +220,8 @@ class MainWindow(QMainWindow):
         self.view.region_drag = self._region_drag_target
         self.view.planes_toggled.connect(self._on_planes_toggled)
         self.view.construction_key.connect(self.toggle_construction)
+        self.view.dim_clicked.connect(self.edit_dimension)
+        self.view.dim_menu.connect(self._dimension_menu)
         self.view.fillet_commit.connect(self.on_fillet_commit)
         self.view.fillet_preview.connect(self.on_fillet_preview)
         self.view.fillet_cancel.connect(self.on_fillet_cancel)
@@ -274,6 +276,7 @@ class MainWindow(QMainWindow):
         self._mirror_axis = None   # (a_idx, b_idx, line_idx) for symmetry tool
         self._mirroring = False
         self.selection_menu = None  # the last right-click tools menu
+        self.dimension_menu = None  # the last right-click menu of a dimension on the sketch
         self._sketch_undo: dict[int, list[dict]] = {}
         self._sketch_redo: dict[int, list[dict]] = {}
         self._sketch_restoring = False
@@ -1883,7 +1886,16 @@ class MainWindow(QMainWindow):
             self.refresh_constraints()
 
     def edit_constraint(self, item):
-        i = self.constraints.row(item)
+        self.edit_dimension(self.constraints.row(item))
+
+    def edit_dimension(self, i: int):
+        """Change constraint i's value (a click on its label, or a double-click in the list)."""
+        if self.mode != "sketch" or not 0 <= i < len(self.sketch.constraints):
+            return
+        self._settle_session()
+        if self.pending is not None:
+            self.set_tool(self.tool)  # drop a half-drawn shape
+        self.constraints.setCurrentRow(i)
         sk = self.sketch
         c = sk.constraints[i]
         if c.expression is not None:
@@ -1903,7 +1915,27 @@ class MainWindow(QMainWindow):
         if c.value is None:
             return
         self._push_sketch_undo()
-        self._constraint_session(f"Edit {c.kind}", c, new=False)
+        self._constraint_session(self.CONSTRAINT_LABELS.get(c.kind, c.kind.title()), c, new=False)
+
+    def delete_dimension(self, i: int):
+        if self.mode != "sketch" or not 0 <= i < len(self.sketch.constraints):
+            return
+        self._settle_session()
+        self._push_sketch_undo()
+        self.sketch.remove_constraint(i)
+        self.sketch.version += 1
+        self.view.set_dim_hover(None)
+        self._solve_sketch()
+
+    def _dimension_menu(self, i: int, x: float, y: float):
+        """Right-click on a dimension's label: change it or delete it."""
+        if self.mode != "sketch" or not 0 <= i < len(self.sketch.constraints):
+            return
+        menu = QMenu(self.view)
+        menu.addAction("✎ Change", lambda: self.edit_dimension(i))
+        menu.addAction("🗑 Delete dimension", lambda: self.delete_dimension(i))
+        self.dimension_menu = menu
+        menu.popup(self.view.mapToGlobal(QPoint(int(x), int(y))))
 
     def delete_constraint(self):
         i = self.constraints.currentRow()
@@ -2508,6 +2540,7 @@ class MainWindow(QMainWindow):
         snapshot = sk.to_dict()
         if new:
             sk.constraints.append(c)
+        self.view.set_dim_active(next((i for i, x in enumerate(sk.constraints) if x is c), None))
 
         def preview(values):
             c.value = values["value"]
@@ -2515,6 +2548,7 @@ class MainWindow(QMainWindow):
             return None if self._solve_sketch() else f"Can't solve the sketch ({sk.status})"
 
         def restore():
+            self.view.set_dim_active(None)
             self._sketch_restoring = True
             try:
                 self._restore_sketch(snapshot, index)
@@ -2526,8 +2560,11 @@ class MainWindow(QMainWindow):
             sk.version += 1
             self._solve_sketch()
 
+        def done():
+            self.view.set_dim_active(None)
+
         items = [Number("value", "Value", c.value, lo=1e-6, hi=1e6)]
-        self._open_session(title, items, preview, lambda: None, restore)
+        self._open_session(title, items, preview, lambda: None, restore, done)
 
     def _open_session(self, title, items, preview, check, restore, done=None):
         """preview(values) -> error or None; check() -> error or None; restore() undoes everything."""
