@@ -105,6 +105,7 @@ class MainWindow(FilesMixin, SelectionMixin, ConstraintsMixin, SketchToolsMixin,
         self._tarc_from = None  # tangent arc tool: (("l" | "a", index), unit direction) it leaves along
         self._chain_item = None  # the newest line or arc of the chain being drawn
         self._trim_stroke = []  # trim tool: sketch points along the current drag
+        self._last_offset = 2.0  # offset distance used last (mm)
         self._arc_sweep = 0.0  # arc tool: degrees swept by the pointer from the start (+ counter-clockwise)
         self._arc_angle = 0.0  # arc tool: the pointer's last angle around the centre (degrees)
         self._drawn = None  # shape just drawn whose size boxes stay on it (see _show_drawn)
@@ -281,6 +282,8 @@ class MainWindow(FilesMixin, SelectionMixin, ConstraintsMixin, SketchToolsMixin,
             act("┄ Construction (Q)", self.toggle_construction,
                 "Make the selected lines, circles and arcs reference geometry (or normal again): dashed, "
                 "used for snapping and constraints, never part of a region"),
+            act("⧉ Offset", self.offset_selection,
+                "A parallel copy of the selected lines, arcs and circles, kept at a distance"),
             act("🗑 Delete selection", self.delete_selection, "Delete selected sketch items"),
             act("🗑 Delete constraint", self.delete_constraint, "Delete the constraint highlighted in the list"),
         ])

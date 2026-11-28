@@ -106,6 +106,7 @@ class Constraint:
     refs: list[int]
     value: float | None = None
     expression: str | None = None  # expression using variables, when not None
+    group: str | None = None  # dimensions made together (an offset's distances): edited and shown as one
 
     def label(self, unit: Unit = MM) -> str:
         v = f" = {unit.fmt(self.value)}" if self.value is not None else ""
@@ -280,7 +281,12 @@ class Sketch:
             elif k == "distance":
                 h = s.addPointsDistance(c.value, pts[r[0]], pts[r[1]], wp, g)
             elif k == "spacing":
-                h = s.addPointLineDistance(c.value, pts[r[0]], lines[r[1]], wp, g)
+                # the solver's distance is signed (+: right of the line's direction): keep the point on
+                # the side it is on now, whichever way round the line was drawn
+                (ax, ay), (bx, by) = self.points[self.lines[r[1]][0]], self.points[self.lines[r[1]][1]]
+                px, py = self.points[r[0]]
+                left = (bx - ax) * (py - ay) - (by - ay) * (px - ax) > 0
+                h = s.addPointLineDistance(-c.value if left else c.value, pts[r[0]], lines[r[1]], wp, g)
             elif k == "parallel":
                 h = s.addParallel(lines[r[0]], lines[r[1]], wp, g)
             elif k == "perpendicular":

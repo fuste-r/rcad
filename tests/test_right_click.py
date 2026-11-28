@@ -91,7 +91,7 @@ def test_right_click_on_sketch_geometry_offers_its_tools(qapp, quiet):
     w.set_tool("select")
     _right(w, (20, 0, 0))  # the bottom line, not selected yet: it is selected and its tools open
     assert w.view.sketch_sel == {("l", 0)} and w.mode == "sketch"
-    assert _menu(w) == ["Distance", "Horizontal", "Vertical", "┄ Construction", "🗑 Delete"]
+    assert _menu(w) == ["Distance", "Horizontal", "Vertical", "┄ Construction", "⧉ Offset", "🗑 Delete"]
     n = len(w.sketch.lines)
     next(a for a in w.selection_menu.actions() if a.text() == "🗑 Delete").trigger()
     assert len(w.sketch.lines) == n - 1

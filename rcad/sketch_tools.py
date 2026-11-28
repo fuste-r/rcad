@@ -9,6 +9,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from .sketch import Constraint, end_direction, tangent_arc
+from .offset import chains, offset, OffsetError
+from .tool_bar import Choice, Number
 from .trim import piece_at, trim
 from .snapping import find_snap, grid_step, Snap, START
 from .viewport import Viewport
@@ -850,6 +852,67 @@ class SketchToolsMixin:
                 seen.add(key)
                 pieces.append(p)
         return pieces
+
+    # -- offset
+    def offset_selection(self):
+        """A parallel copy of the selected lines, arcs and circles, at a distance set in the settings
+        bar (typed or scrubbed, previewed live). It stays at that distance as the sketch changes."""
+        if self.mode != "sketch":
+            return
+        self._settle_session()
+        sk, index = self.sketch, self.sketch_index
+        picked = [(k, i) for k, i in self.view.sketch_sel if k in ("l", "c", "a")]
+        if not picked:
+            self.statusBar().showMessage("Select lines, arcs or circles to offset (double-click picks a "
+                                         "whole outline).", 6000)
+            return
+        found, circles = chains(sk, picked)
+        closed = any(ch.closed for ch in found) or (circles and not found)
+        sides = [("out", "Outside"), ("in", "Inside")] if closed else [("left", "Left"), ("right", "Right")]
+        self._push_sketch_undo()
+        snapshot = sk.to_dict()
+
+        def put_back():
+            self._sketch_restoring = True
+            try:
+                self._restore_sketch(snapshot, index)
+            finally:
+                self._sketch_restoring = False
+
+        last = {"distance": self._last_offset}
+
+        def preview(values):
+            put_back()
+            last["distance"] = values["distance"]
+            try:
+                result = offset(sk, picked, values["distance"], flip=values["side"] in ("in", "right"))
+            except OffsetError as e:
+                sk.solve()
+                self._update_regions()
+                return f"Can't offset: {e}."
+            self._auto_constrain(result.keep)
+            sk.version += 1
+            if not self._solve_sketch():
+                return f"Can't solve the sketch ({sk.status})"
+            self.view.sketch_sel = set(result.items)
+            return None
+
+        def restore():
+            put_back()
+            stack = self._sketch_undo.get(index)
+            if stack:
+                stack.pop()  # the snapshot taken when the offset started
+            sk.version += 1
+            self._solve_sketch()
+
+        def done():
+            self._last_offset = last["distance"]
+            self.view.sketch_sel.clear()
+            self._update_regions()
+
+        items = [Number("distance", "Distance", self._last_offset, lo=1e-6, hi=1e5),
+                 Choice("side", "Side", sides, sides[0][0])]
+        self._open_session("Offset", items, preview, lambda: None, restore, done)
 
     def toggle_construction(self):
         """Q: selected lines, circles and arcs become reference geometry, or normal again if they all are."""

@@ -308,7 +308,11 @@ class ConstraintsMixin:
         self.view.conflicts = set()
         self._settle_session()
         self._push_sketch_undo()
-        self.sketch.remove_constraint(i)
+        group = self.sketch.constraints[i].group
+        if group:  # one of an offset's distances: the offset stops following, all of it together
+            self.sketch.constraints = [c for c in self.sketch.constraints if c.group != group]
+        else:
+            self.sketch.remove_constraint(i)
         self.sketch.version += 1
         self.view.set_dim_hover(None)
         self._solve_sketch()
@@ -382,6 +386,9 @@ class ConstraintsMixin:
 
         def preview(values):
             c.value = values["value"]
+            for other in sk.constraints:  # an offset's distances change together
+                if c.group and other.group == c.group and other.value is not None:
+                    other.value = c.value
             sk.version += 1
             return None if self._solve_sketch() else f"Can't solve the sketch ({sk.status})"
 

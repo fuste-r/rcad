@@ -20,7 +20,8 @@
 - [x] Offer context-aware actions based on the current selection, and add direct drag editing for chamfer to complement the existing fillet interaction.
 - [x] Add sketch arcs and construction geometry. Support closed profiles that combine lines, arcs, and circles.
 - [x] Add a trim tool (click a piece, or drag across several).
-- [ ] Add split and offset tools and projected model edges.
+- [x] Add an offset tool for lines, arcs and circles (one dimension edits the whole offset).
+- [ ] Add a split tool and projected model edges; link an offset circle's radius to its original's.
 - [x] Add radius, tangent (line–arc and arc–arc), and concentric sketch constraints.
 - [ ] Add an angle constraint, equal radius, and expression support for dimensions other than distance.
 

@@ -1423,9 +1423,14 @@ class Viewport(QOpenGLWidget):
         sk = self.sketch
         wanted = []
         if sk is not None and self.show_marks:
+            seen = set()
             for cid, c in enumerate(sk.constraints):
                 if c.kind not in self.MARKS:
                     continue
+                if c.group:
+                    if (c.group, c.kind) in seen:
+                        continue  # an offset's parallels: one shown for all
+                    seen.add((c.group, c.kind))
                 try:
                     wanted += [(cid, c.kind, q) for q in self._mark_spots(cid, c)]
                 except (IndexError, KeyError):
@@ -1475,9 +1480,14 @@ class Viewport(QOpenGLWidget):
         pl = self.sketch.plane
         w, h = self.width(), self.height()
         positions = []
+        groups = set()
         for cid, c in enumerate(self.sketch.constraints):
             if c.value is None:
                 continue
+            if c.group:
+                if c.group in groups:
+                    continue  # an offset's distances: one label edits them all
+                groups.add(c.group)
             try:
                 if c.kind == "distance":
                     a, b = self.sketch.points[c.refs[0]], self.sketch.points[c.refs[1]]

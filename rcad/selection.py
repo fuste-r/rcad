@@ -71,6 +71,9 @@ class SelectionMixin:
                 more.append(("┄ Construction" if on else "━ Normal geometry", self.toggle_construction,
                              "Reference geometry: dashed, for snapping and constraints, never part of a region"
                              if on else "Make the selected reference geometry normal again (Q)"))
+            if lines or circles or arcs:
+                more.append(("⧉ Offset", self.offset_selection,
+                             "A parallel copy at a distance that stays at that distance"))
             delete = ("🗑", self.delete_selection, "Delete the selected sketch items")
             return ("sketch", tuple(sel)), anchor, tools[:2], more, delete
         if v.sel_plane is not None:
