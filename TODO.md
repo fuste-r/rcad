@@ -19,7 +19,8 @@
 - [x] Make displayed sketch dimensions editable on-canvas and open the corresponding constraint editor when selected.
 - [x] Offer context-aware actions based on the current selection, and add direct drag editing for chamfer to complement the existing fillet interaction.
 - [x] Add sketch arcs and construction geometry. Support closed profiles that combine lines, arcs, and circles.
-- [ ] Add trim/split/offset tools and projected model edges.
+- [x] Add a trim tool (click a piece, or drag across several).
+- [ ] Add split and offset tools and projected model edges.
 - [x] Add radius, tangent (line–arc and arc–arc), and concentric sketch constraints.
 - [ ] Add an angle constraint, equal radius, and expression support for dimensions other than distance.
 

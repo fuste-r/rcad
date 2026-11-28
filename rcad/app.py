@@ -104,6 +104,7 @@ class MainWindow(FilesMixin, SelectionMixin, ConstraintsMixin, SketchToolsMixin,
         self._arc_start = None  # arc tool: (point index or None, uv, Snap) of the start, after the centre
         self._tarc_from = None  # tangent arc tool: (("l" | "a", index), unit direction) it leaves along
         self._chain_item = None  # the newest line or arc of the chain being drawn
+        self._trim_stroke = []  # trim tool: sketch points along the current drag
         self._arc_sweep = 0.0  # arc tool: degrees swept by the pointer from the start (+ counter-clockwise)
         self._arc_angle = 0.0  # arc tool: the pointer's last angle around the centre (degrees)
         self._drawn = None  # shape just drawn whose size boxes stay on it (see _show_drawn)
@@ -249,7 +250,7 @@ class MainWindow(FilesMixin, SelectionMixin, ConstraintsMixin, SketchToolsMixin,
         draw = []
         for name, text in [("select", "⌖ Select"), ("line", "╱ Line"), ("rect", "⬜ Rectangle"),
                            ("circle", "◯ Circle"), ("arc", "◠ Arc"),
-                           ("tarc", "◡ Tangent arc")]:
+                           ("tarc", "◡ Tangent arc"), ("trim", "✂ Trim")]:
             a = act(text, lambda _=False, n=name: self.set_tool(n), checkable=True)
             group.addAction(a)
             a.setChecked(name == "select")
@@ -606,6 +607,8 @@ class MainWindow(FilesMixin, SelectionMixin, ConstraintsMixin, SketchToolsMixin,
         self.draw_button.setText(f"Draw: {self.tool_actions[name].text().split(' ', 1)[1]} ▾")
         self.tool = name
         self.view.marks_clickable = name == "select"
+        self.view.trim_preview = []
+        self._trim_stroke = []
         self.pending = None
         self._pending_snap = None
         self._arc_start = None

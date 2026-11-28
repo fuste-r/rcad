@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from .sketch import Constraint, end_direction, tangent_arc
+from .trim import piece_at, trim
 from .snapping import find_snap, grid_step, Snap, START
 from .viewport import Viewport
 
@@ -34,6 +35,9 @@ class SketchToolsMixin:
         phase is "press" (track the geometry under the cursor), "move" (apply the
         cursor delta directly so the view updates live), or "release" (solve and
         either keep the move or revert it if the solve fails)."""
+        if self.tool == "trim" and self.sketch is not None:
+            self._trim_stroke_event(phase, x, y)
+            return
         if phase == "press":
             if self.tool == "select" and self.sketch is not None:
                 self._sketch_press_uv = self.view.sketch_uv(x, y)
@@ -245,6 +249,11 @@ class SketchToolsMixin:
         self.view.sel_constraint = None
         self._push_sketch_undo()
         sk = self.sketch
+        if self.tool == "trim":
+            uv = self.view.sketch_uv(x, y)
+            if uv is None or not self._trim_at([uv], self._trim_tol(x, y)):
+                self._sketch_undo.get(self.sketch_index, [None]).pop()  # nothing changed: no undo step
+            return
         if self.tool == "select":
             hit = self.view.pick_sketch(x, y)
             sel = self.view.sketch_sel
@@ -693,6 +702,12 @@ class SketchToolsMixin:
         self.statusBar().showMessage(f"Arc R {self.unit.fmt(r)}, {abs(sweep):.4g}°", 4000)
 
     def _update_preview(self, x, y):
+        if self.tool == "trim":
+            if not self._trim_stroke:
+                uv = self.view.sketch_uv(x, y)
+                piece = None if uv is None else piece_at(self.sketch, uv, self._trim_tol(x, y))
+                self._show_trim([piece] if piece else [])
+            return
         snap = self._snap(x, y)
         self._show_snap(snap)
         if snap is None or self.pending is None:
@@ -753,6 +768,88 @@ class SketchToolsMixin:
         snapped = f"   ·   snap: {self._snap_text}" if self._snap_text else ""
         self.statusBar().showMessage(f"u={u.from_mm(uv[0]):.{u.decimals}f}  v={u.from_mm(uv[1]):.{u.decimals}f} {u.name}"
                                      + snapped)
+
+    # -- trim
+    TRIM_PX = 8  # how close (screen pixels) the pointer must be to a curve to trim it
+
+    def _trim_tol(self, x, y) -> float:
+        a, b = self.view.sketch_uv(x, y), self.view.sketch_uv(x + 1, y)
+        return self.TRIM_PX * (math.dist(a, b) if a is not None and b is not None else 0.1)
+
+    def _show_trim(self, pieces):
+        pl = self.sketch.plane
+        self.view.trim_preview = [np.array([pl.to3d(*q) for q in p.polyline]) for p in pieces]
+        self.view.update()
+
+    def _trim_at(self, uvs, tol) -> bool:
+        """Trim the piece under each point of uvs in turn (a click is one point, a drag many).
+        If the sketch can't be solved afterwards, nothing is trimmed. Returns whether anything was."""
+        sk = self.sketch
+        snapshot = sk.to_dict()
+        dropped, done = [], 0
+        for uv in uvs:
+            piece = piece_at(sk, uv, tol)
+            if piece is None:
+                continue
+            result = trim(sk, piece)
+            self._auto_constrain(result.keep)
+            dropped += result.dropped
+            done += 1
+        self._show_trim([])
+        if not done:
+            if len(uvs) == 1:
+                self.statusBar().showMessage("Nothing to trim here: point at a line, circle or arc.", 4000)
+            return False
+        if not sk.solve():
+            self._restore_sketch(snapshot, self.sketch_index)
+            self.statusBar().showMessage("Trim undone: the sketch can't be solved without that piece.", 8000)
+            return False
+        self.view.sketch_sel.clear()
+        msg = f"Trimmed {done} piece{'s' if done > 1 else ''}."
+        if dropped:
+            names = sorted({self.CONSTRAINT_LABELS.get(k, k.replace('_', ' ').capitalize()) for k in dropped})
+            msg += " Removed constraints that no longer applied: " + ", ".join(names) + "."
+        self._solve_sketch()
+        self.statusBar().showMessage(msg, 8000)
+        return True
+
+    def _trim_stroke_event(self, phase, x, y):
+        """Drag across pieces: each one the stroke passes over is trimmed (shown red as it goes)."""
+        uv = self.view.sketch_uv(x, y)
+        if phase == "press":
+            self._trim_stroke = [] if uv is None else [uv]
+            self._trim_stroke_tol = self._trim_tol(x, y)
+            return
+        if uv is None or not self._trim_stroke:
+            return
+        tol = self._trim_stroke_tol
+        if phase == "move":
+            last = self._trim_stroke[-1]
+            steps = max(1, int(math.dist(last, uv) / (tol / 2)))
+            self._trim_stroke += [(last[0] + (uv[0] - last[0]) * k / steps, last[1] + (uv[1] - last[1]) * k / steps)
+                                  for k in range(1, steps + 1)]
+            self._show_trim(self._stroke_pieces(self._trim_stroke, tol))
+            return
+        stroke, self._trim_stroke = self._trim_stroke, []
+        if len(stroke) > 1:  # (a click without dragging is trimmed by _sketch_click)
+            # the pieces as they were when crossed, each trimmed at its own middle
+            middles = [p.polyline[len(p.polyline) // 2] for p in self._stroke_pieces(stroke, tol)]
+            self._push_sketch_undo()
+            if not self._trim_at(middles, tol):
+                self._sketch_undo.get(self.sketch_index, [None]).pop()
+
+    def _stroke_pieces(self, stroke, tol):
+        """The different pieces a stroke passes over, in the order it meets them."""
+        seen, pieces = set(), []
+        for q in stroke:
+            p = piece_at(self.sketch, q, tol)
+            if p is None:
+                continue
+            key = (p.kind, p.index, p.lo.uv if p.lo else None, p.hi.uv if p.hi else None)
+            if key not in seen:
+                seen.add(key)
+                pieces.append(p)
+        return pieces
 
     def toggle_construction(self):
         """Q: selected lines, circles and arcs become reference geometry, or normal again if they all are."""

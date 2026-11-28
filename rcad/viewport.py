@@ -131,6 +131,7 @@ class Viewport(QOpenGLWidget):
         self.sel_plane: str | None = None
         self._datum_half = datum.MIN_HALF
         self._plane_labels: dict[str, QLabel] = {}
+        self.trim_preview: list[np.ndarray] = []  # world polylines of the pieces trim would remove
         self.snap_mark = None  # {"kind", "at": world point, "guides": [(world a, world b)]} while drawing
         self.sel_faces: set[int] = set()
         self.sel_edges: set[int] = set()
@@ -719,6 +720,15 @@ class Viewport(QOpenGLWidget):
             self._draw_sketch_geometry(sk, self.sketch_sel, self.theme.sketch)
         if sk is not None and self.snap_mark is not None:
             self._draw_snap_mark(self.snap_mark)
+        if sk is not None and self.trim_preview:
+            GL.glColor3f(*self.DIM_COLOR)
+            GL.glLineWidth(4)
+            for poly in self.trim_preview:
+                GL.glBegin(GL.GL_LINE_STRIP)
+                for p in poly:
+                    GL.glVertex3f(*p)
+                GL.glEnd()
+            GL.glLineWidth(1)
         GL.glColor3f(*self.theme.preview)
         GL.glLineWidth(1.5)
         for poly in self.preview:
