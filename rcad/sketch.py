@@ -558,3 +558,54 @@ def _fuse(faces: list[Face]) -> list[Face]:
         return list(faces)
     merged = faces[0].fuse(*faces[1:]).clean()
     return merged.faces()
+
+
+def end_direction(sk: Sketch, p: int, prefer=None):
+    """The line or arc ending at point p, and the unit direction it travels as it arrives there:
+    (("l" | "a", index), (du, dv)), or None. `prefer` picks among several (the newest of a chain);
+    otherwise an arc wins over lines, and the last-added one wins among equals."""
+    cands = [("l", i) for i, ab in enumerate(sk.lines) if p in ab]
+    cands += [("a", i) for i, (_, s, e) in enumerate(sk.arcs) if p in (s, e)]
+    if not cands:
+        return None
+    item = prefer if prefer in cands else max(cands, key=lambda c: (c[0] == "a", c[1]))
+    kind, i = item
+    pu, pv = sk.points[p]
+    if kind == "l":
+        a, b = sk.lines[i]
+        ou, ov = sk.points[b if p == a else a]
+        d = math.hypot(pu - ou, pv - ov)
+        return (item, ((pu - ou) / d, (pv - ov) / d)) if d > 1e-12 else None
+    c, s, e = sk.arcs[i]
+    cu, cv = sk.points[c]
+    ang = math.atan2(pv - cv, pu - cu)
+    ccw = (-math.sin(ang), math.cos(ang))  # arcs run counter-clockwise from s to e
+    return item, (ccw if p == e else (-ccw[0], -ccw[1]))
+
+
+def tangent_arc(start, direction, toward, radius=None, sweep=None):
+    """The arc that leaves `start` heading along `direction` and bends round to `toward` (both in
+    sketch coordinates): (center, end, signed radius (+: bends left), sweep in degrees), or None
+    when `toward` is straight ahead or behind. A given radius or sweep (degrees) overrides the
+    pointer's; the pointer still decides which way it bends."""
+    su, sv = start
+    tu, tv = direction
+    nu, nv = -tv, tu  # to the left of the direction
+    du, dv = toward[0] - su, toward[1] - sv
+    side = du * nu + dv * nv
+    if abs(side) < 1e-9 * max(1.0, math.hypot(du, dv)):
+        return None
+    r = (du * du + dv * dv) / (2 * side)
+    if radius is not None and abs(radius) > 1e-9:
+        r = math.copysign(abs(radius), side)
+    cu, cv = su + nu * r, sv + nv * r
+    turn = 1 if r > 0 else -1  # left: counter-clockwise
+    a_s = math.atan2(sv - cv, su - cu)
+    if sweep is None:
+        a_p = math.atan2(toward[1] - cv, toward[0] - cu)
+        sweep = math.degrees((a_p - a_s) * turn) % 360
+    else:
+        sweep = abs(sweep) % 360
+    a_e = a_s + turn * math.radians(sweep)
+    end = (cu + abs(r) * math.cos(a_e), cv + abs(r) * math.sin(a_e))
+    return (cu, cv), end, r, sweep

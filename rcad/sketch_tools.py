@@ -8,7 +8,7 @@ import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
-from .sketch import Constraint
+from .sketch import Constraint, end_direction, tangent_arc
 from .snapping import find_snap, grid_step, Snap, START
 from .viewport import Viewport
 
@@ -198,8 +198,13 @@ class SketchToolsMixin:
             mods = QApplication.keyboardModifiers()
         start = self.pending if self.tool == "line" else None
         last = self.pending is not None and (self.tool == "circle" or (self.tool == "arc" and self._arc_start))
+        tangent = None
+        if start is not None and start[0] is not None:  # a line leaving an arc's end: snap along its tangent
+            came = end_direction(self.sketch, start[0], prefer=self._chain_item)
+            if came is not None and came[0][0] == "a":
+                tangent = (came[0][1], came[1])
         return find_snap(self.sketch, uv, self.SNAP_PX * mm_per_px, grid_step(g, mm_per_px), start=start,
-                         smart=not mods & Qt.ControlModifier, curves=not last)
+                         smart=not mods & Qt.ControlModifier, curves=not last, tangent=tangent)
 
     SNAP_PX = 10  # how close (screen pixels) the pointer must be for a snap
 
@@ -278,6 +283,7 @@ class SketchToolsMixin:
         "rect": [("W", "W", "length"), ("H", "H", "length")],
         "circle": [("D", "Ø", "length")],
         "arc": [("R", "R", "length"), ("S", "∠", "angle")],  # radius, then the angle it sweeps
+        "tarc": [("R", "R", "length"), ("S", "∠", "angle")],
     }
 
     def _apply_locks(self, p0, uv):
@@ -314,7 +320,19 @@ class SketchToolsMixin:
                 ux, uy = (du / n, dv / n) if n > 1e-12 else (1.0, 0.0)
                 return p0[0] + abs(r) * ux, p0[1] + abs(r) * uy
             return self._arc_end(p0, uv)
+        if self.tool == "tarc":
+            hit = self._tangent_arc(p0, uv)
+            return hit[1] if hit is not None else uv
         return uv
+
+    def _tangent_arc(self, start, uv):
+        """The tangent arc from the pending point toward uv, with any typed radius and angle:
+        (center, end, signed radius, sweep degrees), or None (straight on, or nothing to follow)."""
+        if self._tarc_from is None:
+            return None
+        f = self.fields
+        return tangent_arc(start, self._tarc_from[1], uv, f.locked("R") if f.active else None,
+                           f.locked("S") if f.active else None)
 
     def _arc_end(self, center, uv):
         """Where the arc's end goes: on its radius, at the typed sweep angle or toward the pointer."""
@@ -346,6 +364,9 @@ class SketchToolsMixin:
             return {"W": abs(du), "H": abs(dv)}
         if self.tool == "circle":
             return {"D": 2 * math.hypot(du, dv)}
+        if self.tool == "tarc":
+            hit = self._tangent_arc(p0, uv)
+            return {"R": abs(hit[2]), "S": hit[3]} if hit is not None else {"R": 0.0, "S": 0.0}
         if self.tool == "arc":
             if self._arc_start is None:
                 return {"R": math.hypot(du, dv), "S": 0.0}
@@ -514,7 +535,10 @@ class SketchToolsMixin:
                 li = sk.add_line(a, b)
                 sk.version += 1
                 self._last_segment = (a, b)
+                self._chain_item = ("l", li)
                 cons = start_snap.constraints(a) if start_snap is not None and a_idx is None else []
+                if snap is not None and snap.kind == "tangent":
+                    cons.append(Constraint("tangent", [li, snap.tangent]))
                 if snap is not None and pi is None:
                     level = [ax for ax, ref in snap.align if ref == START]
                     cons += [Constraint("horizontal" if ax == "h" else "vertical", [li]) for ax in level]
@@ -527,6 +551,18 @@ class SketchToolsMixin:
             self._solve_sketch()
             if self.pending is None:  # the chain ended on an existing point
                 self._show_last_segment()
+        elif self.tool == "tarc":
+            if self.pending is None:  # where it starts: the end of a line or arc
+                came = end_direction(sk, pi) if pi is not None else None
+                if came is None:
+                    self.statusBar().showMessage("Start a tangent arc on the end of a line or arc.", 6000)
+                    return
+                self._tarc_from = came
+                self._chain_item = came[0]
+                self.pending = (pi, tuple(sk.points[pi]))
+                self._start_fields()
+                return
+            self._finish_tangent_arc(pi, uv, snap)
         elif self.tool == "rect":
             if self.pending is None:
                 self.pending = (pi, uv)
@@ -581,6 +617,48 @@ class SketchToolsMixin:
                 self.fields.set_values(self._field_values(c_uv, uv))
                 return
             self._finish_arc(c_idx, c_uv, pi, uv, start_snap)
+
+    def _finish_tangent_arc(self, pi, uv, snap):
+        """Add the tangent arc from the pending point to uv, tangent to what it leaves; the chain then
+        goes on from its end."""
+        sk = self.sketch
+        s, s_uv = self.pending
+        hit = self._tangent_arc(s_uv, uv)
+        if hit is None or hit[3] < 0.5 or hit[3] > 359.5:
+            return  # straight on, or a whole circle: keep drawing
+        center, end, r, sweep = hit
+        c = sk.add_point(*center)
+        lands = pi is not None and pi not in (s, c) and math.dist(sk.points[pi], end) < 1e-6 * max(abs(r), 1)
+        e = pi if lands else sk.add_point(*end)
+        ai = sk.add_arc(c, s, e) if r > 0 else sk.add_arc(c, e, s)  # stored counter-clockwise
+        sk.version += 1
+        kind, j = self._tarc_from[0]
+        cons = [Constraint("tangent", [j, ai]) if kind == "l" else Constraint("tangent_arcs", [j, ai])]
+        if snap is not None and not lands and math.dist(snap.uv, end) < 1e-9:
+            cons += snap.constraints(e)  # the end went where the pointer snapped
+        if lands:  # closing onto the end of another line or arc it meets smoothly: tangent there too
+            arrive = end_direction(sk, e, prefer=("a", ai))[1]
+            for kind2, j2 in [("l", i) for i, ab in enumerate(sk.lines) if e in ab] + \
+                    [("a", i) for i, (_, s2, e2) in enumerate(sk.arcs) if e in (s2, e2) and i != ai]:
+                other = end_direction(sk, e, prefer=(kind2, j2))
+                if other is None or other[0] != (kind2, j2):
+                    continue
+                ou, ov = other[1]
+                if abs(arrive[0] * ov - arrive[1] * ou) < 1e-6:  # parallel at the joint: smooth
+                    cons.append(Constraint("tangent", [j2, ai]) if kind2 == "l"
+                                else Constraint("tangent_arcs", [j2, ai]))
+        self._auto_constrain(cons)
+        self._solve_sketch()
+        self._chain_item = ("a", ai)
+        self.statusBar().showMessage(f"Tangent arc R {self.unit.fmt(abs(r))}, {sweep:.4g}°", 4000)
+        if lands:  # closed onto existing geometry: the chain ends
+            self.pending = None
+            self._tarc_from = None
+            self._start_fields()
+            return
+        self._tarc_from = end_direction(sk, e, prefer=("a", ai))
+        self.pending = (e, tuple(sk.points[e]))
+        self._start_fields()
 
     def _finish_arc(self, c_idx, c_uv, pi, uv, centre_snap):
         """Third click of the arc tool: add the arc from its start to the end on its radius.
@@ -646,6 +724,18 @@ class SketchToolsMixin:
             self.view.preview = [np.array([pl.to3d(*p) for p in c])]
         elif self.tool == "circle":
             self.view.preview = [np.array(Viewport._circle_world(pl, p0, math.dist(p0, uv)))]
+        elif self.tool == "tarc":
+            hit = self._tangent_arc(p0, uv)
+            if hit is None:  # straight on: show the direction it would leave in
+                t = self._tarc_from[1] if self._tarc_from else (1.0, 0.0)
+                self.view.preview = [np.array([pl.to3d(*p0), pl.to3d(p0[0] + t[0], p0[1] + t[1])])]
+            else:
+                (cu, cv), _, r, sweep = hit
+                a0 = math.atan2(p0[1] - cv, p0[0] - cu)
+                turn = math.radians(sweep) * (1 if r > 0 else -1)
+                self.view.preview = [np.array([pl.to3d(cu + abs(r) * math.cos(a0 + turn * k),
+                                                       cv + abs(r) * math.sin(a0 + turn * k))
+                                               for k in np.linspace(0, 1, 64)])]
         elif self.tool == "arc":
             if self._arc_start is None:  # the radius, and the circle the arc will lie on
                 self.view.preview = [np.array([pl.to3d(*p0), pl.to3d(*uv)]),

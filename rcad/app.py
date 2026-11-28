@@ -29,7 +29,7 @@ from .quick_buttons import QuickButtons
 from .recovery import Autosaver
 from .selection import SelectionMixin
 from .sessions import SessionsMixin
-from .sketch import Sketch, SketchPlane, standard_plane
+from .sketch import end_direction, Sketch, SketchPlane, standard_plane
 from .sketch_tools import SketchToolsMixin
 from .theme import apply_choice, CHOICES
 from .tool_bar import ToolSettingsBar
@@ -102,6 +102,8 @@ class MainWindow(FilesMixin, SelectionMixin, ConstraintsMixin, SketchToolsMixin,
         self._snap_text = ""  # what the pointer snaps to, for the status bar
         self._pending_snap = None  # the Snap the pending first point was placed with
         self._arc_start = None  # arc tool: (point index or None, uv, Snap) of the start, after the centre
+        self._tarc_from = None  # tangent arc tool: (("l" | "a", index), unit direction) it leaves along
+        self._chain_item = None  # the newest line or arc of the chain being drawn
         self._arc_sweep = 0.0  # arc tool: degrees swept by the pointer from the start (+ counter-clockwise)
         self._arc_angle = 0.0  # arc tool: the pointer's last angle around the centre (degrees)
         self._drawn = None  # shape just drawn whose size boxes stay on it (see _show_drawn)
@@ -246,7 +248,8 @@ class MainWindow(FilesMixin, SelectionMixin, ConstraintsMixin, SketchToolsMixin,
         self.tool_actions = {}
         draw = []
         for name, text in [("select", "⌖ Select"), ("line", "╱ Line"), ("rect", "⬜ Rectangle"),
-                           ("circle", "◯ Circle"), ("arc", "◠ Arc")]:
+                           ("circle", "◯ Circle"), ("arc", "◠ Arc"),
+                           ("tarc", "◡ Tangent arc")]:
             a = act(text, lambda _=False, n=name: self.set_tool(n), checkable=True)
             group.addAction(a)
             a.setChecked(name == "select")
@@ -594,6 +597,11 @@ class MainWindow(FilesMixin, SelectionMixin, ConstraintsMixin, SketchToolsMixin,
         self.refresh()
 
     def set_tool(self, name):
+        # switching between Line and Tangent arc mid-chain carries on from the chain's end
+        chain = self.pending[0] if (self.pending is not None and self.mode == "sketch" and name != self.tool
+                                    and {self.tool, name} <= {"line", "tarc"}) else None
+        if chain is None:
+            self._chain_item = None
         self.tool_actions[name].setChecked(True)
         self.draw_button.setText(f"Draw: {self.tool_actions[name].text().split(' ', 1)[1]} ▾")
         self.tool = name
@@ -607,6 +615,18 @@ class MainWindow(FilesMixin, SelectionMixin, ConstraintsMixin, SketchToolsMixin,
         self.view.preview = []
         self.view.sketch_sel.clear()
         self._update_regions()
+        if chain is not None:
+            self._resume_chain(chain)
+
+    def _resume_chain(self, p: int):
+        """Go on drawing from point p with the current tool (a tangent arc follows the chain's last curve)."""
+        if self.tool == "tarc":
+            self._tarc_from = end_direction(self.sketch, p, prefer=self._chain_item)
+            if self._tarc_from is None:
+                return
+        self.pending = (p, tuple(self.sketch.points[p]))
+        self._start_fields()
+        self.statusBar().showMessage("Carrying on from the end of the chain.", 3000)
 
     def cancel(self):
         if self._session is not None:  # Esc: the open tool is cancelled and the feature put back

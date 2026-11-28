@@ -14,7 +14,8 @@
 
 - [x] Unify direct manipulation for extrude, push/pull, fillet, and chamfer with live previews and precise numeric entry; reduce the split between drag interactions and dialogs.
 - [x] Add smart snapping and optional auto-constraints for endpoints, midpoints, centers, and alignments.
-- [ ] Snap to tangency: offer a tangent arc start or line end while drawing (the tangent constraint and arcs exist now).
+- [x] Snap to tangency: a tangent arc tool, and lines drawn on from an arc's end snap along its tangent.
+- [ ] Tangent snapping between free lines and circles (a line touching a circle; needs a tangent constraint for full circles).
 - [x] Make displayed sketch dimensions editable on-canvas and open the corresponding constraint editor when selected.
 - [x] Offer context-aware actions based on the current selection, and add direct drag editing for chamfer to complement the existing fillet interaction.
 - [x] Add sketch arcs and construction geometry. Support closed profiles that combine lines, arcs, and circles.

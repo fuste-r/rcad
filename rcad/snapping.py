@@ -17,6 +17,7 @@ class Snap:
     line: int | None = None  # line for midpoint / on_line
     circle: int | None = None  # circle for on_circle
     arc: int | None = None  # arc for on_arc
+    tangent: int | None = None  # kind "tangent": the arc a line drawn from its end leaves tangentially
     align: list[tuple[str, int]] = field(default_factory=list)  # ("h" same v | "v" same u, point or START)
 
     def constraints(self, p: int, start: int | None = None) -> list[Constraint]:
@@ -39,7 +40,7 @@ class Snap:
 
     def describe(self, sk: Sketch) -> str:
         names = {"point": "point", "midpoint": "midpoint", "on_line": "on line", "on_circle": "on circle",
-                 "on_arc": "on arc"}
+                 "on_arc": "on arc", "tangent": "tangent to the arc"}
         parts = [names[self.kind]] if self.kind in names else []
         for axis, ref in self.align:
             what = ("the start" if ref == START
@@ -51,6 +52,8 @@ class Snap:
     def guides(self, sk: Sketch, start_uv=None) -> list[tuple[tuple, tuple]]:
         """Dashed alignment lines from each reference point to the snapped point (sketch coordinates)."""
         out = []
+        if self.kind == "tangent" and start_uv is not None:
+            out.append((tuple(start_uv), self.uv))
         for _, ref in self.align:
             ref_uv = start_uv if ref == START else tuple(sk.points[ref])
             if ref_uv is not None:
@@ -74,9 +77,10 @@ def _round(uv, g):
 
 
 def find_snap(sk: Sketch, uv, tol: float, grid: float = 0.0, start=None, smart: bool = True,
-              curves: bool = True, skip_points=()) -> Snap:
+              curves: bool = True, skip_points=(), tangent=None) -> Snap:
     """Where a point drawn at uv lands. tol: snap distance in sketch units; start: (index or None, uv) of
-    the pending start point, used for alignment; curves: allow snapping onto lines and circles."""
+    the pending start point, used for alignment; curves: allow snapping onto lines and circles;
+    tangent: (arc index, unit direction) when a line starts at an arc's end, to snap along its tangent."""
     uv = (float(uv[0]), float(uv[1]))
     if not smart:
         return Snap(_round(uv, grid), "grid" if grid > 0 else "free")
@@ -102,6 +106,17 @@ def find_snap(sk: Sketch, uv, tol: float, grid: float = 0.0, start=None, smart: 
         if best is not None:
             return Snap(best[1], "midpoint", line=best[0])
 
+    # 3. straight on from an arc's end, along its tangent
+    if tangent is not None and start is not None:
+        arc_i, (tu, tv) = tangent
+        su, sv = start[1]
+        du, dv = uv[0] - su, uv[1] - sv
+        along, across = du * tu + dv * tv, du * tv - dv * tu
+        if along > tol and abs(across) <= tol:
+            if grid > 0:
+                along = max(grid, round(along / grid) * grid)
+            return Snap((su + tu * along, sv + tv * along), "tangent", tangent=arc_i)
+
     # alignment candidates: the nearest point (or the start) level with uv, per axis
     refs = [(i, tuple(p)) for i, p in enumerate(sk.points) if i not in skip]
     if start is not None:
@@ -114,7 +129,7 @@ def find_snap(sk: Sketch, uv, tol: float, grid: float = 0.0, start=None, smart: 
             _, _, r, p = min(cands, key=lambda c: (c[0] > 1e-9, c[1]))  # exact ties: nearest reference
             align[axis] = (r, p)
 
-    # 3. a curve, alone or where an alignment crosses it
+    # 4. a curve, alone or where an alignment crosses it
     curve = _nearest_curve(sk, uv, tol) if curves else None
     if curve is not None:
         kind, idx, foot = curve
@@ -124,7 +139,7 @@ def find_snap(sk: Sketch, uv, tol: float, grid: float = 0.0, start=None, smart: 
                 return Snap(hit, "on_" + kind, **{kind: idx}, align=[(axis, r)])
         return Snap(foot, "on_" + kind, **{kind: idx})
 
-    # 4. alignment: both axes pin the point; one axis pins one coordinate and the grid the other
+    # 5. alignment: both axes pin the point; one axis pins one coordinate and the grid the other
     if align:
         u, v = _round(uv, grid)
         if "v" in align:
