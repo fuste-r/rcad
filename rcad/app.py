@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import sys
+import time
 
 import numpy as np
 from PySide6.QtCore import QPoint, QSettings, Qt, QTimer
@@ -25,6 +26,7 @@ from .sketch import (
     standard_plane,
     reflect_point_across_line,
 )
+from .recovery import Autosaver, find_recoveries
 from .snapping import START, Snap, find_snap, grid_step
 from .units import MM, UNITS
 from .theme import CHOICES, apply_choice
@@ -193,6 +195,11 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.doc = Document()
         self.path: str | None = None
+        self.autosaver = Autosaver()
+        self.autosave_timer = QTimer(self)
+        self.autosave_timer.setInterval(self.AUTOSAVE_MS)
+        self.autosave_timer.timeout.connect(self.autosave)
+        self.autosave_timer.start()
         self.dirty = False
         self.mode = "model"  # or "sketch"
         self.sketch_index = -1
@@ -3201,6 +3208,57 @@ class MainWindow(QMainWindow):
         self.rebuild()
 
     # ---- files
+    AUTOSAVE_MS = 60_000  # how often unsaved changes are copied for recovery after a crash
+
+    def autosave(self) -> bool:
+        """Copy unsaved changes to the recovery folder (never to the project file itself)."""
+        if not self.dirty:
+            return False
+        try:
+            self.autosaver.write(self.doc, self.path)
+            return True
+        except Exception as e:  # a full disk or a document that won't serialise: keep working
+            self.statusBar().showMessage(f"Autosave failed: {e}", 8000)
+            return False
+
+    def offer_recovery(self) -> str | None:
+        """At start-up: offer to restore work left unsaved by an rCad that closed without saving
+        (the newest copy; any others are offered next time). Returns what was done."""
+        recs = find_recoveries()
+        if not recs:
+            return None
+        rec = recs[0]
+        answer = self._ask_recovery(rec)
+        if answer == "restore":
+            try:
+                doc = rec.document()
+            except (ValueError, KeyError, TypeError) as e:
+                QMessageBox.warning(self, "Recovery failed", f"The recovery copy can't be read: {e}")
+                rec.discard()
+                return "failed"
+            self._load(doc, rec.project)
+            self.autosaver.adopt(rec)
+            self.mark_dirty(True)
+            self.statusBar().showMessage(f"Restored unsaved work on {rec.name}: save to keep it.", 10000)
+        elif answer == "discard":
+            rec.discard()
+        return answer
+
+    def _ask_recovery(self, rec) -> str:
+        """'restore', 'discard' or 'later'."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Recover unsaved work")
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(rec.saved_at))
+        box.setText(f"rCad closed without saving changes to {rec.name}.\n"
+                    f"A copy from {when} was kept. Restore it?")
+        restore = box.addButton("Restore", QMessageBox.AcceptRole)
+        discard = box.addButton("Discard", QMessageBox.DestructiveRole)
+        box.addButton("Not now", QMessageBox.RejectRole)
+        box.setDefaultButton(restore)
+        box.exec()
+        clicked = box.clickedButton()
+        return "restore" if clicked is restore else "discard" if clicked is discard else "later"
+
     def _confirm_discard(self) -> bool:
         if not self.dirty:
             return True
@@ -3209,6 +3267,7 @@ class MainWindow(QMainWindow):
 
     def _load(self, doc, path):
         self._cancel_session()
+        self.autosaver.clear()  # the document it copied is being replaced
         self.doc, self.path = doc, path
         self.sketch_index = -1
         self._undo.clear()
@@ -3240,6 +3299,7 @@ class MainWindow(QMainWindow):
         try:
             self.doc.save(self.path)
             self.mark_dirty(False)
+            self.autosaver.clear()
         except OSError as e:
             QMessageBox.warning(self, "Save failed", str(e))
 
@@ -3258,7 +3318,12 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Export failed", str(e))
 
     def closeEvent(self, e):
-        e.accept() if self._confirm_discard() else e.ignore()
+        if not self._confirm_discard():
+            e.ignore()
+            return
+        self.autosave_timer.stop()
+        self.autosaver.clear()  # closed on purpose: nothing to recover
+        e.accept()
 
 
 def main():
@@ -3269,4 +3334,5 @@ def main():
     app = QApplication(sys.argv)
     w = MainWindow()
     w.show()
+    QTimer.singleShot(0, w.offer_recovery)
     sys.exit(app.exec())

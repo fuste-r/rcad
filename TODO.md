@@ -67,7 +67,7 @@ Interaction ideas taken from superGeometry.app's README (Nov 2026). Several of t
 - [ ] Add measurement tools for distance, angle, area, volume, and bounding boxes, plus a draggable section plane.
 - [ ] Add display styles for smooth shading and hidden edges, and improve selection with box selection and tangent-chain/loop picking.
 - [ ] Add import for STEP and IGES solids, BREP, STL meshes, and DXF/SVG sketch geometry, with unit handling and explicit multi-object behavior.
-- [ ] Add atomic project saves, autosave, and crash recovery.
+- [x] Add atomic project saves, autosave, and crash recovery.
 - [ ] Update the README controls and workflow documentation to cover undo/redo, variables, expressions, and the implemented direct-manipulation tools.
 - [ ] Improve recovery from failed history features: identify the failing feature in the tree, preserve the last valid model, and make it straightforward to edit or suppress the failure.
 - [ ] Add end-to-end smoke coverage for opening, editing, saving, and exporting a representative project, alongside the existing focused unit and GUI tests.

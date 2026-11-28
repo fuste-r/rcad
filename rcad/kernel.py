@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import tempfile
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -213,6 +216,42 @@ def build_mesh(shape: Shape, tol: float = 0.05) -> MeshData:
     return MeshData(np.array(verts, np.float32).reshape(-1, 3), np.array(tris, np.uint32).reshape(-1, 3),
                     np.array(owner, np.int32), faces, edges, shape, face_body=face_body, edge_body=edge_body,
                     _edge_shapes=edge_shapes)
+
+
+def atomic_write(path: str, text: str, backup: bool = False) -> None:
+    """Replace `path` with `text` in one step: write a temporary file beside it, flush it to disk,
+    then rename it over the old one. With backup, the old file is first copied to path.bak."""
+    path = os.path.abspath(path)
+    folder = os.path.dirname(path)
+    fd, tmp = tempfile.mkstemp(dir=folder, prefix="." + os.path.basename(path) + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        if os.path.exists(path):  # keep the file's permissions (mkstemp makes it owner-only)
+            os.chmod(tmp, os.stat(path).st_mode & 0o7777)
+        else:
+            umask = os.umask(0)
+            os.umask(umask)
+            os.chmod(tmp, 0o666 & ~umask)
+        if backup and os.path.exists(path):
+            shutil.copy2(path, path + ".bak")
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    try:  # make the rename itself survive a power cut
+        dfd = os.open(folder, os.O_RDONLY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    except OSError:
+        pass
 
 
 def _mostly_inside(part: Shape, solid: Shape) -> bool:
@@ -495,14 +534,19 @@ class Document:
                 "features": [f.to_dict() for f in self.features],
                 "variables": self.variables}
 
-    def save(self, path: str) -> None:
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump(self.to_dict(), fh, indent=1)
+    def save(self, path: str, backup: bool = True) -> None:
+        """Write the project so a crash or a full disk can never leave a half-written file: the
+        previous version stays whole until the new one is complete (and is kept as path.bak)."""
+        atomic_write(path, json.dumps(self.to_dict(), indent=1), backup=backup)
 
     @staticmethod
     def load(path: str) -> "Document":
         with open(path, encoding="utf-8") as fh:
-            d = json.load(fh)
+            return Document.from_dict(json.load(fh))
+
+    @staticmethod
+    def from_dict(d: dict) -> "Document":
+        """A document from its saved form (a project file's contents), rebuilt."""
         if d.get("format") != "rcad" or d.get("version", 0) > FORMAT_VERSION:
             raise ValueError("not an rCad project (or saved by a newer version)")
         doc = Document([Feature.from_dict(f) for f in d["features"]], units=d.get("units", "mm"))
